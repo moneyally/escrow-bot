@@ -14,6 +14,7 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .. import config as cfgmod
@@ -21,7 +22,8 @@ from .. import core
 from ..db import DB
 from ..money import fmt, parse_usdt
 
-STATIC = Path(__file__).with_name("static")
+STATIC = Path(__file__).with_name("static")       # 예전 단일 HTML (React 빌드가 없을 때만)
+WEB = Path(__file__).with_name("web")             # admin-web(React) 빌드 결과 — npm run build
 SESSION_HOURS = 12
 COOKIE = "escrow_admin"
 
@@ -114,7 +116,8 @@ def create_app(cfg=None, database: DB | None = None) -> FastAPI:
     # ── 화면·로그인 ──
     @app.get("/", response_class=HTMLResponse)
     async def index():
-        return FileResponse(STATIC / "index.html")
+        page = WEB / "index.html"
+        return FileResponse(page if page.exists() else STATIC / "index.html", headers={"Cache-Control": "no-cache"})
 
     @app.get("/login")
     async def login(t: str = ""):
@@ -383,6 +386,8 @@ def create_app(cfg=None, database: DB | None = None) -> FastAPI:
         return [{"id": r["id"], "deal_id": r["deal_id"], "actor": r["actor"], "kind": r["kind"], "data": r["data"],
                  "at": r["at"].isoformat()} for r in rows]
 
+    if (WEB / "assets").is_dir():   # 파일 이름에 해시가 붙어 있어 오래 캐시해도 됨
+        app.mount("/assets", StaticFiles(directory=WEB / "assets"), name="assets")
     return app
 
 

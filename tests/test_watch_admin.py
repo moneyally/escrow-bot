@@ -1,4 +1,5 @@
 """트론 해석 · 감시 · 관리 페이지 API."""
+import re
 import hashlib
 import time
 
@@ -194,3 +195,13 @@ async def test_admin_dispute_resolve(users, ctx):
         assert r.status_code == 200, r.text
     pos = await db.fetch("SELECT * FROM payouts WHERE deal_id=$1", d["id"])
     assert sorted(p["gross_micro"] for p in pos) == sorted([50 * MICRO, total - 50 * MICRO]) and all(p["fee_micro"] == 0 for p in pos)
+
+
+async def test_serves_react_build_and_assets(users):
+    """관리 페이지 첫 화면 = admin-web(React) 빌드, 해시 붙은 파일은 /assets 로. 로그인 없이도 화면 껍데기는 열림(데이터는 API 가 막음)."""
+    async with await client(users, logged_in=False) as c:
+        r = await c.get("/")
+        assert r.status_code == 200 and '<div id="root">' in r.text
+        js = re.search(r'src="(/assets/[^"]+\.js)"', r.text).group(1)
+        assert (await c.get(js)).status_code == 200
+        assert (await c.get("/api/stats")).status_code == 401

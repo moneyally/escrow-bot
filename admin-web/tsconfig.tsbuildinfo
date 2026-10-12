@@ -1,0 +1,1 @@
+{"root":["./src/App.tsx","./src/api.ts","./src/labels.ts","./src/main.tsx","./src/ui.tsx","./src/views/Approvals.tsx","./src/views/Audit.tsx","./src/views/Dashboard.tsx","./src/views/Deals.tsx","./src/views/Deposits.tsx","./src/views/Payouts.tsx","./src/views/Rooms.tsx","./src/views/Settings.tsx","./src/views/Users.tsx"],"version":"5.8.3"}
