@@ -10,6 +10,8 @@ REPO=${REPO:-https://github.com/moneyally/escrow-bot.git}
 [ -n "$DOMAIN" ] || { echo "사용: bash install.sh admin.도메인 (도메인 없으면 서버IP를 점 대신 - 로: 1-2-3-4.sslip.io)"; exit 1; }
 
 APT="apt-get -o DPkg::Lock::Timeout=600"
+# 앞에서 반쯤 설치된 패키지가 있으면 먼저 마무리 (첫 부팅 자동 업데이트와 겹친 경우 등)
+DEBIAN_FRONTEND=noninteractive dpkg --configure -a 2>&1 | tail -n 40 || true
 $APT update -q
 DEBIAN_FRONTEND=noninteractive $APT install -yq postgresql python3-venv python3-pip git ufw debian-keyring \
     debian-archive-keyring apt-transport-https curl
