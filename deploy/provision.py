@@ -213,10 +213,11 @@ def create():
                 print(f"{loc} 실패: {e}")
         else:
             raise last
-        ip = res["server"]["public_net"]["ipv4"]["ip"]
-        st = {"id": res["server"]["id"], "ip": ip, "domain": ip.replace(".", "-") + ".sslip.io", "token": token,
-              "location": res["server"]["datacenter"]["location"]["name"]}
-        STATE.write_text(json.dumps(st))
+        srv = res["server"]
+        ip = srv["public_net"]["ipv4"]["ip"]
+        loc_ = (srv.get("location") or (srv.get("datacenter") or {}).get("location") or {}).get("name", "?")
+        st = {"id": srv["id"], "ip": ip, "domain": ip.replace(".", "-") + ".sslip.io", "token": token, "location": loc_}
+        STATE.write_text(json.dumps(st))      # 응답을 더 읽기 전에 저장 (토큰을 잃으면 그 서버는 못 씀)
         STATE.chmod(0o600)
         print(f"서버 생성: {ip} ({st['location']}) — root 비밀번호는 헤츠너 계정 메일로 감")
     print("부트 통로 기다리는 중 (Caddy·인증서, 보통 2~5분)…")
