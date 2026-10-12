@@ -1,0 +1,19 @@
+[Unit]
+Description=Escrow TRON watcher
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+User=escrow
+WorkingDirectory=/opt/escrow
+EnvironmentFile=/opt/escrow/.env
+ExecStart=/opt/escrow/.venv/bin/python -m escrow.watcher
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

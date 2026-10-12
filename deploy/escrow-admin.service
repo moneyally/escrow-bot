@@ -1,0 +1,19 @@
+[Unit]
+Description=Escrow admin page
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+User=escrow
+WorkingDirectory=/opt/escrow
+EnvironmentFile=/opt/escrow/.env
+ExecStart=/opt/escrow/.venv/bin/uvicorn escrow.admin.app:app --host 127.0.0.1 --port 8090 --proxy-headers
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

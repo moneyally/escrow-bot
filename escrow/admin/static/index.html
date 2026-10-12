@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>에스크로 관리</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --ink:#1c1f24; --mute:#6b7280; --line:#e5e7eb; --pri:#2563eb; --ok:#16a34a; --warn:#d97706; --bad:#dc2626; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#111317; --card:#1a1d23; --ink:#e7e9ee; --mute:#9aa1ad; --line:#2a2f37; --pri:#60a5fa; } }
+  * { box-sizing: border-box; }
+  body { margin:0; font: 15px/1.5 -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif; background:var(--bg); color:var(--ink); }
+  header { position:sticky; top:0; background:var(--card); border-bottom:1px solid var(--line); padding:10px 16px; z-index:2; }
+  header h1 { margin:0 0 6px; font-size:17px; }
+  nav { display:flex; gap:6px; overflow-x:auto; padding-bottom:2px; }
+  nav button { border:1px solid var(--line); background:transparent; color:var(--ink); border-radius:999px; padding:5px 12px; white-space:nowrap; cursor:pointer; }
+  nav button.on { background:var(--pri); border-color:var(--pri); color:#fff; }
+  nav .n { display:inline-block; min-width:18px; margin-left:4px; padding:0 5px; border-radius:9px; background:var(--bad); color:#fff; font-size:12px; }
+  main { padding:16px; max-width:1100px; margin:0 auto; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px; margin-bottom:12px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(160px, 1fr)); gap:10px; }
+  .stat b { display:block; font-size:22px; }
+  .stat span { color:var(--mute); font-size:13px; }
+  table { width:100%; border-collapse:collapse; font-size:14px; }
+  th, td { text-align:left; padding:8px 6px; border-bottom:1px solid var(--line); vertical-align:top; word-break:break-all; }
+  th { color:var(--mute); font-weight:500; }
+  .btn { border:0; border-radius:8px; padding:6px 12px; cursor:pointer; color:#fff; background:var(--pri); margin:2px; }
+  .btn.ok { background:var(--ok); } .btn.warn { background:var(--warn); } .btn.bad { background:var(--bad); } .btn.ghost { background:transparent; color:var(--pri); border:1px solid var(--line); }
+  input, select { padding:7px 9px; border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--ink); font-size:14px; max-width:100%; }
+  code { font-size:13px; background:var(--bg); padding:1px 5px; border-radius:5px; }
+  .mute { color:var(--mute); } .warnbox { border-color:var(--warn); } .badbox { border-color:var(--bad); }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  #toast { position:fixed; left:50%; bottom:20px; transform:translateX(-50%); background:#111; color:#fff; padding:9px 16px; border-radius:10px; display:none; z-index:9; max-width:90vw; }
+  .tag { display:inline-block; padding:1px 8px; border-radius:999px; font-size:12px; border:1px solid var(--line); }
+  @media (max-width: 640px) { th:nth-child(n+5), td:nth-child(n+5) { display:none; } .wide th, .wide td { display:table-cell !important; } }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">에스크로 관리</h1>
+  <nav id="nav"></nav>
+</header>
+<main id="main"><div class="card">불러오는 중…</div></main>
+<div id="toast"></div>
+<script>
+const TABS = [["dash","대시보드"],["approvals","확인 대기"],["payouts","보낼 것"],["deals","거래"],["deposits","입금 확인"],
+              ["disputes","분쟁"],["users","사용자"],["rooms","거래방"],["settings","설정"],["audit","기록"]];
+const KIND = {deposit:"입금 확인", start:"거래 시작", partial:"부분 지급", final:"최종 정산", refund:"환불", payout_done:"송금 완료 확인"};
+const STATE = {INVITED:"상대 수락 대기",ROOM:"거래방 입장",NOTICE:"공지 확인",CHOOSE:"예치 선택",DEPOSIT:"입금 대기",START_REVIEW:"시작 승인 대기",
+  FUNDED:"거래 중",SPLIT:"정산 방법",ADDRESS:"받을 주소",PAYOUT:"송금 대기",DISPUTE:"분쟁",REFUND:"환불 대기",DONE:"끝",CANCELLED:"취소"};
+const SETTING_LABEL = {"mode.deposit":"입금 인정","mode.start":"거래 시작","mode.partial":"부분 지급","mode.final":"최종 정산",
+  "mode.refund":"환불","mode.payout_done":"송금 완료 확인","fee_micro":"수수료 (USDT)","min_micro":"최소 예치 (USDT)",
+  "refund_fee_micro":"환불 수수료 (USDT)","auto_max_micro":"자동 상한 (USDT, 0=없음)","stage_minutes":"단계 시간 (분)",
+  "slot_minutes":"입금 안내 시간 (분)","slot_grace_minutes":"늦은 입금 허용 (분)","new_deals":"새 거래 받기"};
+let tab = location.hash.slice(1) || "dash";
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const toast = (m) => { const t=$("#toast"); t.textContent=m; t.style.display="block"; clearTimeout(t._h); t._h=setTimeout(()=>t.style.display="none", 3500); };
+const micro = (v) => (v/1e6).toLocaleString("ko-KR", {maximumFractionDigits:6});
+
+async function api(path, opt={}) {
+  const r = await fetch(path, {...opt, headers:{"Content-Type":"application/json","X-Requested-With":"escrow",...(opt.headers||{})}});
+  if (r.status === 401) { $("#main").innerHTML = '<div class="card">로그인이 필요해요. 텔레그램 봇에 <code>/login</code> 을 보내고 받은 링크로 들어오세요.</div>'; throw new Error("401"); }
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { toast(j.detail || ("오류 " + r.status)); throw new Error(j.detail); }
+  return j;
+}
+const post = (p, b={}) => api(p, {method:"POST", body:JSON.stringify(b)});
+
+function navRender(counts={}) {
+  $("#nav").innerHTML = TABS.map(([k,l]) => `<button class="${k===tab?'on':''}" onclick="go('${k}')">${l}${counts[k]?`<span class="n">${counts[k]}</span>`:''}</button>`).join("");
+}
+function go(k) { tab = k; location.hash = k; render(); }
+window.addEventListener("hashchange", () => { tab = location.hash.slice(1) || "dash"; render(); });
+
+async function render() {
+  let s;
+  try { s = await api("/api/stats"); } catch { return; }
+  navRender({approvals: s.pending_approvals, payouts: s.payouts_to_send, deposits: s.unmatched_in, disputes: s.disputes});
+  const m = $("#main");
+  try { await VIEWS[tab](m, s); } catch (e) { if (e.message !== "401") console.error(e); }
+}
+
+const VIEWS = {
+  async dash(m, s) {
+    const me = await api("/api/me");
+    $("#title").textContent = `${me.bot_name} 관리`;
+    const diff = (s.wallet_micro != null) ? s.wallet_micro - s.ledger_micro : null;
+    m.innerHTML = `
+      ${me.stub.length ? `<div class="card warnbox">⚠️ 아직 설정 안 됨: <b>${me.stub.join(", ")}</b> — 서버 .env 를 채워야 실제 운영돼요.</div>` : ""}
+      <div class="grid">
+        ${[["진행 중 거래", s.active], ["오늘 새 거래", s.today], ["끝난 거래", s.done_total], ["확인 대기", s.pending_approvals + (s.held_approvals?` (보류 ${s.held_approvals})`:"")],
+           ["보낼 것", s.payouts_to_send], ["확인 필요 입금", s.unmatched_in], ["분쟁", s.disputes], ["빈 거래방", s.rooms_free]]
+          .map(([k,v]) => `<div class="card stat"><b>${v}</b><span>${k}</span></div>`).join("")}
+      </div>
+      <div class="card">
+        <div>장부상 지갑에 있어야 할 돈: <b>${esc(s.ledger)} USDT</b> <span class="mute">(맡긴 돈 − 보낸 돈, 번 수수료 포함)</span></div>
+        <div>실제 지갑 잔액: <b>${s.wallet != null ? esc(s.wallet) + " USDT" : "아직 조회 전"}</b>
+          ${diff != null ? (diff === 0 ? ' <span class="tag">일치</span>' : ` <span class="tag" style="color:var(--${diff<0?'bad':'warn'})">차이 ${micro(diff)}</span>`) : ""}</div>
+        <div>번 수수료: <b>${esc(s.fees)} USDT</b></div>
+        <div class="mute">받는 주소: <code>${esc(me.pay_address)}</code></div>
+      </div>`;
+  },
+
+  async approvals(m) {
+    const rows = await api("/api/approvals");
+    m.innerHTML = rows.length ? rows.map(a => `
+      <div class="card ${a.status==='held'?'warnbox':''}">
+        <div class="row"><b>${KIND[a.kind]||a.kind}</b> <code>${esc(a.code||"-")}</code> <span class="tag">${esc(STATE[a.deal_state]||a.deal_state||"")}</span>
+          ${a.status==='held'?'<span class="tag">보류됨</span>':''} <span class="mute">${new Date(a.created_at).toLocaleString("ko-KR")}</span></div>
+        <div style="margin:6px 0">${esc(a.detail)}</div>
+        <div class="row"><input id="note${a.id}" placeholder="메모 (선택)">
+          <button class="btn ok" onclick="decide(${a.id}, true)">승인</button>
+          ${a.status==='pending'?`<button class="btn warn" onclick="decide(${a.id}, false)">보류</button>`:''}
+          ${a.code?`<button class="btn ghost" onclick="openDeal('${a.code}')">거래 보기</button>`:''}</div>
+      </div>`).join("") : '<div class="card">확인할 게 없어요.</div>';
+  },
+
+  async payouts(m) {
+    const rows = await api("/api/payouts?status=approved");
+    const sent = await api("/api/payouts?status=sent");
+    m.innerHTML = `<div class="card mute">지갑에서 아래 주소로 정확한 금액을 보내면, 감시가 자동으로 찾아서 처리해요. 자동으로 안 잡히면 tx 해시를 넣어 완료 처리하세요.</div>` +
+      (rows.length ? rows.map(p => `
+      <div class="card">
+        <div class="row"><b>${esc(p.amount)} USDT</b> <span class="tag">${{partial:"부분 지급",final:"정산",refund:"환불"}[p.kind]}</span>
+          <code>${esc(p.code)}</code> @${esc(p.user)} <span class="mute">수수료 ${esc(p.fee)}</span></div>
+        <div class="row" style="margin:6px 0"><code>${esc(p.address)}</code>
+          <button class="btn ghost" onclick="copy('${esc(p.address)}')">주소 복사</button>
+          <button class="btn ghost" onclick="copy('${esc(p.amount_exact)}')">금액 복사</button></div>
+        <div class="row"><input id="tx${p.id}" placeholder="tx 해시 (자동 감지가 안 될 때만)" style="flex:1">
+          <button class="btn ok" onclick="payoutDone(${p.id})">완료 처리</button></div>
+      </div>`).join("") : '<div class="card">보낼 게 없어요.</div>') +
+      (sent.length ? `<div class="card"><b>보냄 · 확인 대기</b>${table(["거래","받는 사람","금액","tx"], sent.map(p=>[p.code, "@"+p.user, p.amount, p.tx_id]))}</div>` : "");
+  },
+
+  async deals(m) {
+    m.innerHTML = `<div class="card row"><select id="fstate"><option value="active">진행 중</option><option value="">전체</option>
+      ${Object.entries(STATE).map(([k,v])=>`<option value="${k}">${v}</option>`).join("")}</select>
+      <input id="fq" placeholder="거래코드 또는 @아이디"><button class="btn" onclick="loadDeals()">찾기</button></div><div id="dl"></div>`;
+    await loadDeals();
+  },
+
+  async deposits(m) {
+    const rows = await api("/api/deposits?status=unmatched");
+    const slots = await api("/api/slots/open");
+    const opts = slots.map(s => `<option value="${s.id}">${esc(s.code)} @${esc(s.user)} ${esc(s.amount)} (${s.status==='waiting'?'대기':'만료'})</option>`).join("");
+    const all = await api("/api/deposits");
+    m.innerHTML = (rows.length ? rows.map(t => `
+      <div class="card ${t.status==='flagged'?'badbox':'warnbox'}">
+        <div><b>${esc(t.amount)} USDT</b> <span class="tag">${t.status==='flagged'?'동결 주소':'맞는 거래 없음'}</span> ${esc(t.note)}</div>
+        <div class="mute">보낸 곳 <code>${esc(t.from_addr)}</code> · ${new Date(t.block_ts).toLocaleString("ko-KR")}</div>
+        <div class="mute">tx <a href="https://tronscan.org/#/transaction/${esc(t.tx_id)}" target="_blank" rel="noopener">${esc(t.tx_id)}</a></div>
+        <div class="row" style="margin-top:6px"><select id="s${t.tx_id}${t.idx}"><option value="">거래 자리 고르기</option>${opts}</select>
+          <button class="btn" onclick="assign('${t.tx_id}', ${t.idx})">이 거래에 연결</button>
+          <button class="btn ghost" onclick="markTx('${t.tx_id}', ${t.idx}, 'returned')">돌려줌 표시</button>
+          <button class="btn ghost" onclick="markTx('${t.tx_id}', ${t.idx}, 'ignored')">무시</button></div>
+      </div>`).join("") : '<div class="card">확인 필요한 입금이 없어요.</div>') +
+      `<div class="card"><b>최근 체인 기록</b>${table(["방향","금액","상태","보낸 곳 → 받는 곳","시각"],
+        all.slice(0,50).map(t => [t.direction==='in'?'입금':'출금', t.amount, t.status, `${t.from_addr} → ${t.to_addr}`, new Date(t.block_ts).toLocaleString("ko-KR")]))}</div>`;
+  },
+
+  async disputes(m) {
+    const rows = await api("/api/deals?state=DISPUTE");
+    m.innerHTML = rows.length ? rows.map(d => `<div class="card row"><code>${esc(d.code)}</code> @${esc(d.creator)} · @${esc(d.partner)}
+      <button class="btn" onclick="openDeal('${d.code}')">열기</button></div>`).join("") : '<div class="card">분쟁 중인 거래가 없어요.</div>';
+  },
+
+  async users(m) {
+    m.innerHTML = `<div class="card row"><input id="uq" placeholder="@아이디 또는 숫자 ID"><button class="btn" onclick="loadUser()">찾기</button></div><div id="ud"></div>`;
+  },
+
+  async rooms(m) {
+    const rows = await api("/api/rooms");
+    m.innerHTML = `<div class="card mute">비공개 슈퍼그룹을 만들고 '새 멤버에게 대화 기록 숨기기'를 켠 뒤, 봇을 관리자(사용자 초대·차단·메시지 삭제)로 넣으면 자동 등록돼요. 넣는 사람은 관리자 계정이어야 해요.</div>
+      <div class="card">${table(["방","상태","거래","메모",""], rows.map(r => [r.title || r.chat_id, {free:"비어 있음",used:"사용 중",broken:"고장"}[r.state],
+        r.code || "", r.note, r.state==='broken' ? H(`<button class="btn ghost" onclick="roomReset(${r.chat_id})">다시 쓰기</button>`) : ""]), true)}</div>`;
+  },
+
+  async settings(m) {
+    const {values} = await api("/api/settings");
+    const modes = Object.keys(values).filter(k => k.startsWith("mode."));
+    const nums = Object.keys(values).filter(k => !k.startsWith("mode.") && k !== "new_deals");
+    m.innerHTML = `
+      <div class="card"><b>단계별 처리</b><div class="mute">수동 = 관리자가 승인해야 다음 단계 · 자동 = 조건 맞으면 바로 (자동 상한을 넘는 금액은 수동)</div>
+        ${table(["단계","방식"], modes.map(k => [SETTING_LABEL[k]||k,
+          H(`<select data-k="${k}"><option value="manual" ${values[k]==='manual'?'selected':''}>수동</option><option value="auto" ${values[k]==='auto'?'selected':''}>자동</option></select>`)]), true)}</div>
+      <div class="card"><b>금액·시간</b>${table(["항목","값"], nums.map(k => [SETTING_LABEL[k]||k,
+          H(`<input data-k="${k}" data-micro="${k.endsWith('_micro')?1:''}" value="${k.endsWith('_micro') ? values[k]/1e6 : values[k]}" inputmode="decimal">`)]), true)}
+        <div class="row" style="margin-top:8px"><label><input type="checkbox" data-k="new_deals" ${values.new_deals?'checked':''}> 새 거래 받기</label></div></div>
+      <div class="card"><button class="btn" onclick="saveSettings()">저장</button></div>`;
+  },
+
+  async audit(m) {
+    const rows = await api("/api/audit");
+    m.innerHTML = `<div class="card">${table(["시각","거래","누가","무엇","내용"], rows.map(e => [new Date(e.at).toLocaleString("ko-KR"),
+      e.deal_id || "", e.actor || "시스템", e.kind, JSON.stringify(e.data)]), true)}</div>`;
+  },
+};
+
+const H = (html) => ({html});   // 표 칸에 HTML 을 넣을 때만 (사용자 글은 절대 H 로 감싸지 말 것)
+function table(head, rows, wide=false) {
+  return `<div style="overflow-x:auto"><table class="${wide?'wide':''}"><tr>${head.map(h=>`<th>${h}</th>`).join("")}</tr>${rows.map(r =>
+    `<tr>${r.map(c => `<td>${c && typeof c === "object" && "html" in c ? c.html : esc(c)}</td>`).join("")}</tr>`).join("")}</table></div>`;
+}
+async function copy(t) { try { await navigator.clipboard.writeText(t); toast("복사했어요"); } catch { prompt("복사하세요", t); } }
+async function decide(id, ok) {
+  if (ok && !confirm("승인할까요? 돈이 움직이는 단계일 수 있어요.")) return;
+  const note = ($("#note"+id)||{}).value || "";
+  const r = await post(`/api/approvals/${id}/${ok?'approve':'hold'}`, {note}); toast(r.result); render();
+}
+async function payoutDone(id) {
+  const tx = $("#tx"+id).value.trim(); if (!tx) return toast("tx 해시를 넣어주세요");
+  if (!confirm("이 해시로 송금 완료 처리할까요?")) return;
+  const r = await post(`/api/payouts/${id}/done`, {tx_id: tx}); toast(r.result); render();
+}
+async function assign(tx, idx) {
+  const v = $("#s"+tx+idx).value; if (!v) return toast("거래 자리를 골라주세요");
+  if (!confirm("이 입금을 그 거래에 연결할까요? 받은 금액 그대로 인정돼요.")) return;
+  const r = await post(`/api/deposits/${tx}/${idx}/assign`, {slot_id: +v}); toast(r.result); render();
+}
+async function markTx(tx, idx, status) {
+  const note = prompt(status === "returned" ? "돌려준 tx 해시나 메모" : "무시하는 이유"); if (note === null) return;
+  const r = await post(`/api/deposits/${tx}/${idx}/mark`, {status, note}); toast(r.result); render();
+}
+async function loadDeals() {
+  const st = $("#fstate").value, q = $("#fq").value.trim();
+  const rows = await api(`/api/deals?state=${encodeURIComponent(st)}&q=${encodeURIComponent(q)}`);
+  $("#dl").innerHTML = `<div class="card">${table(["코드","상태","신청자","상대","만든 때"], rows.map(d =>
+    [H(`<button class="btn ghost" onclick="openDeal('${d.code}')">${d.code}</button>`), STATE[d.state]||d.state, "@"+d.creator, d.partner?("@"+d.partner):"", new Date(d.created_at).toLocaleString("ko-KR")]))}</div>`;
+}
+async function openDeal(code) {
+  const d = await api("/api/deals/" + code);
+  const names = Object.fromEntries(d.parties.map(p => [p.tg_id, "@" + (p.username || p.tg_id)]));
+  const isDispute = d.deal.state === "DISPUTE";
+  $("#main").innerHTML = `
+    <div class="card"><div class="row"><b>${esc(d.deal.code)}</b> <span class="tag">${STATE[d.deal.state]||d.deal.state}</span>
+      <button class="btn ghost" onclick="go(tab)">← 목록</button></div>
+      <div class="mute">만든 때 ${new Date(d.deal.created_at).toLocaleString("ko-KR")} · 수수료 ${micro(d.deal.fee_micro)} USDT ${d.deal.close_reason ? "· " + esc(d.deal.close_reason) : ""}</div>
+      ${table(["사람","역할","공지","예치","완료","남은 몫"], d.parties.map(p => [names[p.tg_id], p.role==='creator'?'신청자':'상대', p.notice_ok?'확인':'-',
+        {deposit:'맡김',none:'안 맡김'}[p.choice]||'-', p.complete?'누름':'-', (d.balances[p.tg_id] ?? "0") + " USDT"]), true)}</div>
+    ${isDispute ? `<div class="card badbox"><b>분쟁 결정</b><div class="mute">남은 돈을 어떻게 나눌지 (합계가 남은 금액과 같아야 함). 수수료 비우면 거래 수수료 그대로.</div>
+      ${d.parties.map(p => `<div class="row">${names[p.tg_id]} <input data-plan="${p.tg_id}" placeholder="USDT" inputmode="decimal"></div>`).join("")}
+      <div class="row"><input id="rfee" placeholder="수수료 (선택)" inputmode="decimal"><button class="btn bad" onclick="resolve('${d.deal.code}')">이대로 결정</button>
+      <button class="btn ghost" onclick="reopen('${d.deal.code}')">분쟁 풀고 이어서 진행</button></div></div>` : ""}
+    ${!["DONE","CANCELLED"].includes(d.deal.state) ? `<div class="card row"><input id="creason" placeholder="취소 사유"><button class="btn bad" onclick="cancelDeal('${d.deal.code}')">관리자 취소 (돈 있으면 환불)</button></div>` : ""}
+    <div class="card"><b>입금</b>${table(["사람","금액","상태","tx"], d.slots.map(s => [names[s.tg_id], micro(s.amount_micro), s.status, s.tx_id||""]), true)}</div>
+    <div class="card"><b>지급</b>${table(["받는 사람","종류","금액","수수료","주소","상태","tx"], d.payouts.map(p => [names[p.tg_id], p.kind, micro(p.amount_micro), micro(p.fee_micro), p.address||"", p.status, p.tx_id||""]), true)}</div>
+    <div class="card"><b>기록</b>${table(["시각","누가","무엇","내용"], d.events.map(e => [new Date(e.at).toLocaleString("ko-KR"), names[e.actor] || (e.actor? e.actor : "시스템"), e.kind, JSON.stringify(e.data)]), true)}</div>`;
+}
+async function resolve(code) {
+  const plan = {}; document.querySelectorAll("[data-plan]").forEach(i => { if (i.value.trim()) plan[i.dataset.plan] = i.value.trim(); });
+  const fee = $("#rfee").value.trim() || null;
+  if (!confirm("이 분배로 결정할까요? 받을 사람에게 바로 주소를 물어봐요.")) return;
+  const r = await post(`/api/deals/${code}/resolve`, {plan, fee}); toast(r.result); openDeal(code);
+}
+async function reopen(code) { if (!confirm("분쟁을 풀고 이전 단계로 돌릴까요?")) return; const r = await post(`/api/deals/${code}/resolve`, {reopen:true}); toast(r.result); openDeal(code); }
+async function cancelDeal(code) {
+  if (!confirm("이 거래를 취소할까요? 들어온 돈이 있으면 환불 절차로 넘어가요.")) return;
+  const r = await post(`/api/deals/${code}/cancel`, {reason: $("#creason").value}); toast(r.result); openDeal(code);
+}
+async function loadUser() {
+  const q = $("#uq").value.trim(); if (!q) return;
+  const u = await api("/api/users/" + encodeURIComponent(q));
+  $("#ud").innerHTML = `<div class="card"><div><b>@${esc(u.user.username||"-")}</b> ${esc(u.user.name)} <code>${u.user.tg_id}</code> ${u.user.banned?'<span class="tag" style="color:var(--bad)">차단됨</span>':''}</div>
+    <div class="row" style="margin:8px 0"><button class="btn ${u.user.banned?'':'bad'}" onclick="ban(${u.user.tg_id}, ${!u.user.banned})">${u.user.banned?'차단 풀기':'차단'}</button></div>
+    <div class="mute">쓴 주소: ${u.addresses.map(a=>`<code>${esc(a)}</code>`).join(" ") || "없음"}</div>
+    ${table(["거래","상태","만든 때"], u.deals.map(d => [H(`<button class="btn ghost" onclick="openDeal('${d.code}')">${d.code}</button>`), STATE[d.state]||d.state, new Date(d.created_at).toLocaleString("ko-KR")]))}</div>`;
+}
+async function ban(id, b) { if (!confirm(b ? "차단할까요?" : "차단을 풀까요?")) return; const r = await post(`/api/users/${id}/ban`, {banned:b}); toast(r.result); loadUser(); }
+async function roomReset(id) { if (!confirm("방에 아무도 없는지 확인했나요? 다시 쓸 수 있게 할까요?")) return; const r = await post(`/api/rooms/${id}/reset`); toast(r.result); render(); }
+async function saveSettings() {
+  const body = {};
+  document.querySelectorAll("[data-k]").forEach(el => {
+    const k = el.dataset.k;
+    if (el.type === "checkbox") body[k] = el.checked;
+    else if (el.tagName === "SELECT") body[k] = el.value;
+    else body[k] = el.dataset.micro ? Math.round(parseFloat(el.value || "0") * 1e6) : parseInt(el.value || "0", 10);
+  });
+  if (!confirm("설정을 저장할까요?")) return;
+  const r = await api("/api/settings", {method:"PUT", body:JSON.stringify(body)}); toast(r.result); render();
+}
+render();
+setInterval(() => { if (["dash","approvals","payouts","deposits"].includes(tab) && !document.querySelector("input:focus,select:focus")) render(); }, 15000);
+</script>
+</body>
+</html>
