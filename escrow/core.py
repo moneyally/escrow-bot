@@ -26,6 +26,7 @@ ACTIVE = ("INVITED", "ROOM", "NOTICE", "CHOOSE", "DEPOSIT", "START_REVIEW", "FUN
 CLOSED = ("DONE", "CANCELLED")
 EXPIRING = ("INVITED", "ROOM", "NOTICE", "CHOOSE", "DEPOSIT")     # 30분 무응답이면 멈추는 단계 (돈 나가는 단계는 안 멈춤)
 MONEY_HELD = ("received", "confirmed")
+DUST_MICRO = 1 * 1_000_000      # 1 USDT 미만 + 맞는 거래 없음 = 먼지·주소 사칭 tx → 기록만, 알림 X
 
 DEFAULTS = {
     "fee_micro": 20 * MICRO,
@@ -273,9 +274,14 @@ async def claim_invite(c, ctx: Ctx, code: str, tg_id: int):
     u = await user(c, tg_id)
     if u and u["banned"]:
         raise Refused(T.BANNED.format(support=ctx.cfg.support))
+    hint = (d["partner_hint"] or "").lower()
+    if not d["partner"] and hint and (not u or (u["username"] or "").lower() != hint):
+        raise Refused(f"이 링크는 @{T.esc(d['partner_hint'])} 님 전용이에요.")
     if not d["partner"]:
         d = await c.fetchrow("UPDATE deals SET partner=$2, updated_at=now() WHERE id=$1 RETURNING *", d["id"], tg_id)
         await event(c, d["id"], tg_id, "claim", {})
+        await say(c, d["creator"], f"{await label(c, tg_id)} 님이 링크로 들어왔어요. 수락하면 이어집니다. (<code>{d['code']}</code>)",
+                  deal_id=d["id"])
     await _send_invite(c, d)
     return d
 
@@ -422,8 +428,9 @@ async def open_slot(c, ctx: Ctx, deal_id: int, tg_id: int, base: int):
 
 
 async def record_incoming(c, ctx: Ctx, tx_id: str, idx: int, frm: str, to: str, amount: int, block_ts: datetime,
-                          blacklisted: bool | None = None) -> str:
-    """확정 블록에서 본 입금 한 건. 반환: matched / unmatched / flagged / dup."""
+                          blacklisted: bool | None = False) -> str:
+    """확정 블록에서 본 입금 한 건. blacklisted: True 동결 / False 깨끗 / None 조회 실패(→ 자동 모드여도 관리자 확인).
+    반환: matched / unmatched / flagged / ignored(먼지) / dup."""
     if await c.fetchval("SELECT 1 FROM chain_tx WHERE tx_id=$1 AND idx=$2", tx_id, idx):
         return "dup"
     st = await settings(c)
@@ -437,31 +444,39 @@ async def record_incoming(c, ctx: Ctx, tx_id: str, idx: int, frm: str, to: str, 
         status, note = "flagged", "보낸 주소가 테더 동결 목록"
     elif slot and block_ts <= slot["expires_at"] + grace:
         status, slot_id = "matched", slot["id"]
+        if blacklisted is None:
+            note = "동결 목록 조회 실패 — 관리자 확인"
     elif slot:
         note = "안내 시간 지나서 들어옴"
+    elif amount < DUST_MICRO:
+        status, note = "ignored", "먼지 입금"
     await c.execute("INSERT INTO chain_tx(tx_id, idx, direction, from_addr, to_addr, amount_micro, block_ts, status, slot_id, note) "
                     "VALUES($1,$2,'in',$3,$4,$5,$6,$7,$8,$9)", tx_id, idx, frm, to, amount, block_ts, status, slot_id, note)
+    if status == "ignored":
+        return status
     if status != "matched":
         await say_admins(c, ctx, f"⚠️ 확인 필요한 입금 {fmt(amount)} USDT\n보낸 곳 <code>{frm}</code>\n"
                                  f"tx <code>{tx_id}</code>\n{note or '맞는 거래 없음'}")
         return status
-    await _slot_received(c, ctx, slot, tx_id, actor=0)
+    await _slot_received(c, ctx, slot, tx_id, actor=0, force_manual=blacklisted is None)
     return "matched"
 
 
-async def _slot_received(c, ctx: Ctx, slot, tx_id: str, actor: int):
+async def _slot_received(c, ctx: Ctx, slot, tx_id: str, actor: int, force_manual: bool = False):
     d = await _lock(c, slot["deal_id"])
     await c.execute("UPDATE deposit_slots SET status='received', tx_id=$2, updated_at=now() WHERE id=$1", slot["id"], tx_id)
     await event(c, d["id"], actor, "deposit_in", {"slot": slot["id"], "amount": slot["amount_micro"], "tx": tx_id})
     st = await settings(c)
     who_ = await label(c, slot["tg_id"])
     if d["state"] != "DEPOSIT":
-        # 취소·만료 처리 중에 늦게 들어온 돈 → 환불 대상에 들어감 (MONEY_HELD). 관리자에게 알림.
-        await say_admins(c, ctx, f"<code>{d['code']}</code> 상태 {d['state']} 에서 입금 {fmt(slot['amount_micro'])} USDT 들어옴 — 확인해주세요.")
-        if d["state"] in CLOSED:
-            await _open_refund(c, ctx, d, 0, reopen=True)
+        await say_admins(c, ctx, f"<code>{d['code']}</code> 상태 {d['state']} 에서 입금 {fmt(slot['amount_micro'])} USDT 들어옴.")
+        if d["state"] in CLOSED or d["state"] == "REFUND":
+            await _open_refund(c, ctx, d, 0, reopen=True)       # 취소·만료·환불 뒤 늦게 온 돈 → 그 돈도 환불
+        elif d["state"] != "DISPUTE":                            # 분쟁 중이면 분쟁 처리 때 같이 (_resume / resolve)
+            await _ask_approval(c, ctx, d, "deposit", slot["id"],
+                                f"{who_} 입금 {fmt(slot['amount_micro'])} USDT (상태 {d['state']} 에서)\ntx <code>{tx_id}</code>")
         return
-    if is_auto(st, "deposit", slot["amount_micro"]):
+    if not force_manual and is_auto(st, "deposit", slot["amount_micro"]):
         await _slot_confirm(c, ctx, d, slot["id"], actor)
     else:
         await say_deal(c, d, T.deposit_seen(d["code"], who_, slot["amount_micro"], True))
@@ -511,15 +526,15 @@ async def held(c, deal_id: int, statuses=("confirmed",)) -> int:
 
 
 async def balances(c, deal_id: int, statuses=("confirmed",)) -> dict[int, int]:
-    """사람별 남은 몫 = 맡긴 돈 − 그 사람 몫에서 나간 부분 지급. 두 당사자 모두 키로 (0 이어도)."""
+    """사람별 남은 몫 = 맡긴 돈 − 그 사람 몫에서 나간 지급(취소 안 된 모든 지급의 debits). 두 당사자 모두 키로 (0 이어도)."""
     parties = [r["tg_id"] for r in await c.fetch("SELECT tg_id FROM deal_parties WHERE deal_id=$1 ORDER BY role", deal_id)]
     out = {p: 0 for p in parties}
     for r in await c.fetch("SELECT tg_id, sum(amount_micro) s FROM deposit_slots WHERE deal_id=$1 AND status = ANY($2) GROUP BY tg_id",
                            deal_id, list(statuses)):
         out[r["tg_id"]] = out.get(r["tg_id"], 0) + int(r["s"])
-    for r in await c.fetch("SELECT payer, sum(gross_micro) s FROM payouts WHERE deal_id=$1 AND kind='partial' "
-                           "AND status <> 'cancelled' GROUP BY payer", deal_id):
-        out[r["payer"]] = out.get(r["payer"], 0) - int(r["s"])
+    for r in await c.fetch("SELECT debits FROM payouts WHERE deal_id=$1 AND status <> 'cancelled'", deal_id):
+        for k, v in (r["debits"] or {}).items():
+            out[int(k)] = out.get(int(k), 0) - int(v)
     return out
 
 
@@ -551,6 +566,8 @@ async def decide(c, ctx: Ctx, approval_id: int, admin: int, approve: bool, note:
         await event(c, a["deal_id"], admin, "approval_hold", {"id": approval_id, "kind": a["kind"]})
         return "보류했어요. 관리 페이지에서 다시 승인할 수 있어요."
     d = await _lock(c, a["deal_id"]) if a["deal_id"] else None
+    if d and d["state"] == "DISPUTE":
+        raise Refused("분쟁 중인 거래예요. 분쟁을 먼저 처리해주세요.")
     kind = a["kind"]
     if kind == "deposit":
         await _slot_confirm(c, ctx, d, a["ref_id"], admin)
@@ -591,12 +608,12 @@ async def partial(c, ctx: Ctx, deal_id: int, payer: int, amount: int):
     to = _other(d, payer)
     sp = await c.fetchrow("INSERT INTO splits(deal_id, kind, plan, proposer, status) VALUES($1,'partial',$2,$3,'agreed') RETURNING id",
                           deal_id, {str(to): amount}, payer)
-    po = await c.fetchrow("INSERT INTO payouts(deal_id, split_id, tg_id, payer, kind, gross_micro, fee_micro, amount_micro, status) "
-                          "VALUES($1,$2,$3,$4,'partial',$5,0,$5,'need_address') RETURNING *", deal_id, sp["id"], to, payer, amount)
+    po = await c.fetchrow("INSERT INTO payouts(deal_id, split_id, tg_id, payer, kind, gross_micro, fee_micro, amount_micro, status, debits) "
+                          "VALUES($1,$2,$3,$4,'partial',$5,0,$5,'need_address',$6) RETURNING *",
+                          deal_id, sp["id"], to, payer, amount, {str(payer): amount})
     await event(c, deal_id, payer, "partial", {"to": to, "amount": amount, "payout": po["id"]})
     await say_deal(c, d, T.partial_made(d["code"], await label(c, payer), await label(c, to), amount))
-    await say(c, to, T.ask_address(d["code"], amount, 1), deal_id=deal_id)
-    await set_input(c, to, "address", deal_id, po["id"], 7 * 24 * 60)
+    await _ask_address(c, d, po)
     return po
 
 
@@ -679,26 +696,63 @@ async def answer_split(c, ctx: Ctx, deal_id: int, split_id: int, tg_id: int, agr
 async def _make_payouts(c, ctx: Ctx, d, split_id: int, plan: dict[int, int], kind: str, fee: int):
     """분배안 → 받는 사람마다 지급 줄(need_address). 지급 합계가 맡긴 돈을 넘으면 거절 (돈 규칙)."""
     statuses = ("received", "confirmed") if kind == "refund" else ("confirmed",)
-    deposited = await held(c, d["id"], statuses)
-    if await paid_out(c, d["id"]) + sum(v for v in plan.values() if v > 0) > deposited:
-        raise Refused("맡긴 돈보다 많이 나갈 수 없어요.")
+    avail = {p: max(0, v) for p, v in (await balances(c, d["id"], statuses)).items()}
+    debits: dict[int, dict[str, int]] = {}
+    for r, g in plan.items():          # 받는 사람 자기 몫부터, 모자라면 상대 몫에서 (환불 = 자기 돈 그대로)
+        if g <= 0:
+            continue
+        need, dd = g, {}
+        for p in [r] + sorted(k for k in avail if k != r):
+            take = min(need, avail.get(p, 0))
+            if take:
+                dd[str(p)] = dd.get(str(p), 0) + take
+                avail[p] -= take
+                need -= take
+        if need:
+            raise Refused("맡긴 돈보다 많이 나갈 수 없어요.")
+        debits[r] = dd
     fees = split_fee(plan, fee)
     made = 0
     for tg_id, gross in plan.items():
         if gross <= 0:
             continue
+        amount = gross - fees[tg_id]
         po = await c.fetchrow(
-            "INSERT INTO payouts(deal_id, split_id, tg_id, kind, gross_micro, fee_micro, amount_micro, status) "
-            "VALUES($1,$2,$3,$4,$5,$6,$7,'need_address') RETURNING *",
-            d["id"], split_id, tg_id, kind, gross, fees[tg_id], gross - fees[tg_id])
-        if po["amount_micro"] <= 0:
-            continue
+            "INSERT INTO payouts(deal_id, split_id, tg_id, kind, gross_micro, fee_micro, amount_micro, status, debits) "
+            "VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *",
+            d["id"], split_id, tg_id, kind, gross, fees[tg_id], amount, "need_address" if amount > 0 else "confirmed",
+            debits[tg_id])
+        if amount <= 0:
+            continue                    # 받을 몫이 전부 수수료 → 보낼 것 없음
         made += 1
-        await say(c, tg_id, T.ask_address(d["code"], po["amount_micro"], 1), deal_id=d["id"])
-        await set_input(c, tg_id, "address", d["id"], po["id"], 7 * 24 * 60)
+        await _ask_address(c, d, po)
     await event(c, d["id"], 0, "payouts", {"split": split_id, "kind": kind, "count": made})
     if not made:   # 받을 사람이 없음 (전부 0) — 바로 끝
         await _maybe_closed(c, ctx, d, 0)
+
+
+def kb_address(payout_id):
+    return [[["받을 주소 입력", f"d:addr:{payout_id}"]]]
+
+
+async def _ask_address(c, d, po):
+    """받을 주소 묻기 + 입력 대기. 입력 대기가 지워져도(다른 질문·/start) 메시지의 [받을 주소 입력] 으로 다시 열 수 있음."""
+    await say(c, po["tg_id"], T.ask_address(d["code"], po["amount_micro"], 1), kb_address(po["id"]), d["id"])
+    await set_input(c, po["tg_id"], "address", d["id"], po["id"], 7 * 24 * 60)
+
+
+async def reopen_address(c, payout_id: int, tg_id: int):
+    """[받을 주소 입력] 버튼 → 입력 대기 다시 (처음부터)."""
+    po = await c.fetchrow("SELECT p.*, d.code FROM payouts p JOIN deals d ON d.id=p.deal_id WHERE p.id=$1", payout_id)
+    if not po or po["tg_id"] != tg_id or po["status"] != "need_address":
+        raise Refused(T.STALE)
+    await set_input(c, tg_id, "address", po["deal_id"], payout_id, 7 * 24 * 60)
+    return po
+
+
+async def pending_addresses(c, tg_id: int):
+    return await c.fetch("SELECT p.*, d.code FROM payouts p JOIN deals d ON d.id=p.deal_id "
+                         "WHERE p.tg_id=$1 AND p.status='need_address' ORDER BY p.id", tg_id)
 
 
 async def set_address(c, ctx: Ctx, payout_id: int, tg_id: int, address: str):
@@ -707,28 +761,39 @@ async def set_address(c, ctx: Ctx, payout_id: int, tg_id: int, address: str):
     if not po or po["tg_id"] != tg_id or po["status"] != "need_address":
         raise Refused(T.STALE)
     d = await _lock(c, po["deal_id"])
-    if d["state"] == "DISPUTE" and po["kind"] != "final":
+    if d["state"] == "DISPUTE":
         raise Refused(T.LOCKED)
     await c.execute("UPDATE payouts SET address=$2, status='review', updated_at=now() WHERE id=$1", payout_id, address)
     await c.execute("INSERT INTO addresses(tg_id, address) VALUES($1,$2) ON CONFLICT (tg_id, address) DO UPDATE SET last_used=now()",
                     tg_id, address)
     await c.execute("DELETE FROM inputs WHERE tg_id=$1 AND kind='address'", tg_id)
     await event(c, d["id"], tg_id, "address", {"payout": payout_id, "address": address})
-    waiting = await c.fetchval("SELECT count(*) FROM payouts WHERE split_id=$1 AND status='need_address'", po["split_id"])
-    st = await settings(c)
-    kind = po["kind"]
-    total = int(await c.fetchval("SELECT sum(amount_micro) FROM payouts WHERE split_id=$1 AND status <> 'cancelled'", po["split_id"]))
-    sp = await c.fetchrow("SELECT * FROM splits WHERE id=$1", po["split_id"])
-    manual = not (sp["kind"] == "dispute" or is_auto(st, kind, total))
+    manual = await _split_manual(c, po["split_id"])
     await say(c, tg_id, T.address_saved(po["amount_micro"], address, manual), deal_id=d["id"])
-    if waiting:
+    await _after_addresses(c, ctx, d, po["split_id"])
+
+
+async def _split_manual(c, split_id: int) -> bool:
+    st = await settings(c)
+    sp = await c.fetchrow("SELECT * FROM splits WHERE id=$1", split_id)
+    kind = await c.fetchval("SELECT kind FROM payouts WHERE split_id=$1 LIMIT 1", split_id)
+    total = int(await c.fetchval("SELECT coalesce(sum(amount_micro),0) FROM payouts WHERE split_id=$1 AND status <> 'cancelled'", split_id))
+    return not (sp["kind"] == "dispute" or is_auto(st, kind, total))
+
+
+async def _after_addresses(c, ctx: Ctx, d, split_id: int):
+    """그 분배안의 주소가 다 모였으면 → 자동 승인 또는 관리자 확인 요청."""
+    if await c.fetchval("SELECT count(*) FROM payouts WHERE split_id=$1 AND status='need_address'", split_id):
         return
-    if not manual:
-        await _approve_split(c, ctx, d, po["split_id"], 0)
-    else:
-        lines = [f"{await label(c, r['tg_id'])}: {fmt(r['amount_micro'])} → <code>{r['address']}</code>"
-                 for r in await c.fetch("SELECT * FROM payouts WHERE split_id=$1 AND status='review' ORDER BY id", po["split_id"])]
-        await _ask_approval(c, ctx, d, kind, po["split_id"], "\n".join(lines))
+    if not await c.fetchval("SELECT count(*) FROM payouts WHERE split_id=$1 AND status='review'", split_id):
+        return
+    if not await _split_manual(c, split_id):
+        await _approve_split(c, ctx, d, split_id, 0)
+        return
+    kind = await c.fetchval("SELECT kind FROM payouts WHERE split_id=$1 LIMIT 1", split_id)
+    lines = [f"{await label(c, r['tg_id'])}: {fmt(r['amount_micro'])} → <code>{r['address']}</code>"
+             for r in await c.fetch("SELECT * FROM payouts WHERE split_id=$1 AND status='review' ORDER BY id", split_id)]
+    await _ask_approval(c, ctx, d, kind, split_id, "\n".join(lines))
 
 
 async def _approve_split(c, ctx: Ctx, d, split_id: int, actor: int):
@@ -747,11 +812,16 @@ async def record_outgoing(c, ctx: Ctx, tx_id: str, idx: int, frm: str, to: str, 
     """우리 주소에서 나간 USDT → 승인된 지급 줄과 (주소, 금액)이 정확히 같으면 연결."""
     if await c.fetchval("SELECT 1 FROM chain_tx WHERE tx_id=$1 AND idx=$2", tx_id, idx):
         return "dup"
-    po = await c.fetchrow("SELECT * FROM payouts WHERE status='approved' AND address=$1 AND amount_micro=$2 AND tx_id IS NULL "
-                          "ORDER BY id LIMIT 1 FOR UPDATE", to, amount)
-    status = "matched" if po else "unmatched"
+    already = await c.fetchrow("SELECT * FROM payouts WHERE tx_id=$1", tx_id)     # 관리자가 해시로 먼저 완료 처리한 지급
+    po = None if already else await c.fetchrow(
+        "SELECT * FROM payouts WHERE status='approved' AND address=$1 AND amount_micro=$2 AND tx_id IS NULL "
+        "ORDER BY id LIMIT 1 FOR UPDATE", to, amount)
+    status = "matched" if (po or already) else ("ignored" if amount < DUST_MICRO else "unmatched")
     await c.execute("INSERT INTO chain_tx(tx_id, idx, direction, from_addr, to_addr, amount_micro, block_ts, status, payout_id) "
-                    "VALUES($1,$2,'out',$3,$4,$5,$6,$7,$8)", tx_id, idx, frm, to, amount, block_ts, status, po["id"] if po else None)
+                    "VALUES($1,$2,'out',$3,$4,$5,$6,$7,$8)", tx_id, idx, frm, to, amount, block_ts, status,
+                    (po or already)["id"] if (po or already) else None)
+    if already or status == "ignored":
+        return status
     if not po:
         await say_admins(c, ctx, f"⚠️ 지급 목록에 없는 출금 {fmt(amount)} USDT → <code>{to}</code>\ntx <code>{tx_id}</code>")
         return status
@@ -814,8 +884,8 @@ async def _close_room(c, d):
     if d["room_id"]:
         await task(c, "room_close", {"deal_id": d["id"]}, d["room_id"], d["id"])
         await c.execute("UPDATE deals SET room_id=NULL WHERE id=$1", d["id"])   # 방은 다음 거래가 씀 → 이 거래 글은 이제 1:1 로
-    await c.execute("UPDATE deposit_slots SET status='cancelled', updated_at=now() WHERE deal_id=$1 AND status='waiting'", d["id"])
-    await c.execute("DELETE FROM inputs WHERE deal_id=$1", d["id"])
+    # 기다리는 입금 자리는 안 지움: 이미 보낸 돈이 늦게 확정돼도 이 거래 환불로 잡히게 (자리는 시간 지나면 만료)
+    await c.execute("DELETE FROM inputs WHERE deal_id=$1 AND kind <> 'address'", d["id"])
 
 
 # ── 취소·환불·분쟁 ────────────────────────────────────
@@ -859,7 +929,7 @@ async def _open_refund(c, ctx: Ctx, d, actor: int, reopen: bool = False, reason:
     """들어온 돈(확인 전 포함)을 각자 맡긴 만큼 돌려줄 지급 줄 생성 → 주소 받기."""
     await _void_approvals(c, d["id"], ("deposit", "start"))
     await c.execute("UPDATE deposit_slots SET status='confirmed', updated_at=now() WHERE deal_id=$1 AND status='received'", d["id"])
-    await c.execute("UPDATE deposit_slots SET status='cancelled', updated_at=now() WHERE deal_id=$1 AND status='waiting'", d["id"])
+    # 기다리는 입금 자리는 그대로 — 안내 시간 안에 들어오면 _slot_received 가 환불을 다시 만듦
     # 아직 안 나간 지급은 취소 (주소 대기·확인 대기) → 그 몫도 돌려줌
     await c.execute("UPDATE payouts SET status='cancelled', updated_at=now() WHERE deal_id=$1 AND status IN ('need_address','review')",
                     d["id"])
@@ -867,6 +937,9 @@ async def _open_refund(c, ctx: Ctx, d, actor: int, reopen: bool = False, reason:
         await c.fetchrow("UPDATE deals SET state='REFUND', closed_at=NULL, updated_at=now() WHERE id=$1 RETURNING *", d["id"])
     bal = await balances(c, d["id"])
     plan = {p: v for p, v in bal.items() if v > 0}
+    if not plan:
+        await _maybe_closed(c, ctx, d, actor)
+        return d
     sp = await c.fetchrow("INSERT INTO splits(deal_id, kind, plan, proposer, status) VALUES($1,'refund',$2,NULL,'agreed') RETURNING id",
                           d["id"], {str(k): v for k, v in plan.items()})
     st = await settings(c)
@@ -883,6 +956,7 @@ async def open_dispute(c, ctx: Ctx, deal_id: int, tg_id: int):
     if d["state"] in ("PAYOUT",):
         raise Refused("송금 단계예요. 문의는 고객센터로 해주세요.")
     d = await _set_state(c, d, "DISPUTE", tg_id, prev_state=d["state"])
+    await _void_approvals(c, deal_id)          # 분쟁 중엔 아무것도 승인 안 됨 (풀 때 _resume 이 다시 만듦)
     await say_deal(c, d, T.dispute_opened(d["code"], await label(c, tg_id)))
     await say_admins(c, ctx, f"🆘 <b>관리자 호출</b> · <code>{d['code']}</code>\n{await label(c, tg_id)} 님 · 이전 단계 {d['prev_state']}\n"
                              f"맡긴 돈 {fmt(await held(c, deal_id, MONEY_HELD))} USDT", deal_id=deal_id)
@@ -897,11 +971,15 @@ async def resolve_dispute(c, ctx: Ctx, deal_id: int, admin: int, plan: dict[int,
     if d["state"] != "DISPUTE":
         raise Refused("분쟁 중인 거래가 아니에요.")
     if plan is None:
-        d = await _set_state(c, d, d["prev_state"] or "FUNDED", admin)
+        st = await settings(c)
+        back = d["prev_state"] or "FUNDED"
+        d = await _set_state(c, d, back, admin, int(st["stage_minutes"]) if back in EXPIRING else None)
         await say_deal(c, d, f"관리자가 확인을 마쳤어요. 거래를 이어서 진행하세요. (<code>{d['code']}</code>)",
                        kb_funded(deal_id) if d["state"] == "FUNDED" else None)
+        await _resume(c, ctx, d, admin)
         return d
     await c.execute("UPDATE deposit_slots SET status='confirmed', updated_at=now() WHERE deal_id=$1 AND status='received'", deal_id)
+    await c.execute("UPDATE deposit_slots SET status='cancelled', updated_at=now() WHERE deal_id=$1 AND status='waiting'", deal_id)
     await c.execute("UPDATE payouts SET status='cancelled', updated_at=now() WHERE deal_id=$1 AND status IN ('need_address','review')",
                     deal_id)
     await _void_approvals(c, deal_id)
@@ -916,6 +994,30 @@ async def resolve_dispute(c, ctx: Ctx, deal_id: int, admin: int, plan: dict[int,
     await say_deal(c, d, T.dispute_decided(d["code"], [(await label(c, p), v) for p, v in plan.items()]))
     await _make_payouts(c, ctx, d, sp["id"], plan, "final", fee)
     return d
+
+
+async def _resume(c, ctx: Ctx, d, actor: int):
+    """분쟁이 풀린 뒤: 분쟁 중 멈췄던 일(입금 확인·시작 승인·지급 승인·송금 확인·끝내기)을 다시 건다."""
+    d = await c.fetchrow("SELECT * FROM deals WHERE id=$1", d["id"])
+    st = await settings(c)
+    if d["state"] == "DEPOSIT":
+        for s in await c.fetch("SELECT * FROM deposit_slots WHERE deal_id=$1 AND status='received'", d["id"]):
+            if is_auto(st, "deposit", s["amount_micro"]):
+                await _slot_confirm(c, ctx, d, s["id"], actor)
+            else:
+                await _ask_approval(c, ctx, d, "deposit", s["id"], f"{await label(c, s['tg_id'])} 입금 {fmt(s['amount_micro'])} USDT (분쟁 뒤)")
+        await _maybe_funded(c, ctx, await c.fetchrow("SELECT * FROM deals WHERE id=$1", d["id"]), actor)
+    elif d["state"] == "START_REVIEW":
+        await _ask_approval(c, ctx, d, "start", d["id"], f"합계 {fmt(await held(c, d['id']))} USDT (분쟁 뒤)")
+    for r in await c.fetch("SELECT DISTINCT split_id FROM payouts WHERE deal_id=$1 AND status='review'", d["id"]):
+        await _after_addresses(c, ctx, d, r["split_id"])
+    for po in await c.fetch("SELECT * FROM payouts WHERE deal_id=$1 AND status='sent'", d["id"]):
+        if is_auto(st, "payout_done", po["amount_micro"]):
+            await _payout_confirm(c, ctx, po["id"], actor)
+        else:
+            await _ask_approval(c, ctx, d, "payout_done", po["id"],
+                                f"{fmt(po['amount_micro'])} USDT → <code>{po['address']}</code>\ntx <code>{po['tx_id']}</code>")
+    await _maybe_closed(c, ctx, await c.fetchrow("SELECT * FROM deals WHERE id=$1", d["id"]), actor)
 
 
 async def admin_cancel(c, ctx: Ctx, deal_id: int, admin: int, reason: str):
@@ -944,18 +1046,23 @@ async def assign_deposit(c, ctx: Ctx, tx_id: str, idx: int, slot_id: int, admin:
     if not tx or tx["direction"] != "in" or tx["status"] not in ("unmatched", "flagged"):
         raise Refused("연결할 수 있는 입금이 아니에요.")
     slot = await c.fetchrow("SELECT * FROM deposit_slots WHERE id=$1", slot_id)
-    if not slot or slot["status"] not in ("waiting", "expired"):
+    if not slot or slot["status"] not in ("waiting", "expired", "cancelled"):
         raise Refused("그 입금 자리는 이미 처리됐어요.")
     d = await _lock(c, slot["deal_id"])
+    if d["state"] == "DISPUTE":
+        raise Refused("분쟁 중인 거래예요. 분쟁을 먼저 처리해주세요.")
+    if await c.fetchval("SELECT count(*) FROM deposit_slots WHERE deal_id=$1 AND tg_id=$2 AND id<>$3 "
+                        "AND status IN ('waiting','received','confirmed')", d["id"], slot["tg_id"], slot_id):
+        raise Refused("그 사람은 이 거래에 이미 다른 입금 자리가 있어요. 그 자리에 연결하거나 먼저 정리해주세요.")
     await c.execute("UPDATE deposit_slots SET amount_micro=$2, base_micro=LEAST(base_micro,$2), status='received', tx_id=$3, "
                     "updated_at=now() WHERE id=$1", slot_id, tx["amount_micro"], tx_id)
     await c.execute("UPDATE chain_tx SET status='matched', slot_id=$3, note=note || ' · 관리자 연결' WHERE tx_id=$1 AND idx=$2",
                     tx_id, idx, slot_id)
     await event(c, d["id"], admin, "deposit_assign", {"tx": tx_id, "slot": slot_id, "amount": tx["amount_micro"]})
-    if d["state"] == "DEPOSIT":
-        await _slot_confirm(c, ctx, d, slot_id, admin)
-    elif d["state"] in CLOSED or d["state"] == "REFUND":
-        await _open_refund(c, ctx, d, admin, reopen=d["state"] in CLOSED)
+    if d["state"] in CLOSED or d["state"] == "REFUND":
+        await _open_refund(c, ctx, d, admin, reopen=True)
+    else:
+        await _slot_confirm(c, ctx, d, slot_id, admin)     # 관리자가 직접 연결 = 확인한 것
 
 
 async def mark_tx(c, ctx: Ctx, tx_id: str, idx: int, status: str, note: str, admin: int):

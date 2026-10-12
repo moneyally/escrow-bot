@@ -42,6 +42,9 @@ if [ ! -f "$APP/.env" ]; then
 elif [ "$NEWDB" = 1 ]; then
   sed -i "s#^DATABASE_URL=.*#DATABASE_URL=postgresql://escrow:$DBPASS@127.0.0.1:5432/escrow#" "$APP/.env"
 fi
+# .env 의 비밀번호와 DB 계정 비밀번호를 항상 맞춤 (계정은 있는데 .env 를 새로 만든 경우 등)
+CUR=$(grep '^DATABASE_URL=' "$APP/.env" | sed -E 's#.*://escrow:([^@]*)@.*#\1#')
+[ -n "$CUR" ] && sudo -u postgres psql -qc "ALTER ROLE escrow PASSWORD '$CUR'"
 chown escrow: "$APP/.env"; chmod 600 "$APP/.env"
 
 cp "$APP"/deploy/escrow-*.service /etc/systemd/system/

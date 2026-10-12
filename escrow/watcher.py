@@ -33,8 +33,11 @@ async def set_cursor(db: DB, ms: int) -> None:
                      CURSOR_KEY, ms)
 
 
-async def scan_once(db: DB, ctx: core.Ctx, tron: TronGrid, failed: set[str]) -> int:
-    """한 번 훑기. 새로 기록한 Transfer 수."""
+async def scan_once(db: DB, ctx: core.Ctx, tron: TronGrid, failed: set[str], done: set[str] | None = None) -> int:
+    """한 번 훑기. 새로 기록한 Transfer 수.
+    - done: 이 프로세스에서 끝까지 처리한 tx (다시 조회 안 함). 재시작하면 겹침 구간을 다시 보는데, 기록은 (tx_id, idx) 로 중복 거름.
+    - tx 하나가 오류여도 감시 전체는 계속: 그 tx 는 failed 에 넣고 관리자에게 한 번 알림."""
+    done = done if done is not None else set()
     pay = ctx.cfg.pay_address
     cursor = await get_cursor(db)
     cands = await tron.candidate_txids(pay, max(0, cursor - OVERLAP_MS))
@@ -43,38 +46,54 @@ async def scan_once(db: DB, ctx: core.Ctx, tron: TronGrid, failed: set[str]) -> 
     blocked = False
     seen: set[str] = set()
     for tx_id, block_ts in cands:
-        if tx_id in seen or tx_id in failed:
+        if tx_id in seen:
             continue
         seen.add(tx_id)
-        if await db.fetchval("SELECT 1 FROM chain_tx WHERE tx_id=$1 LIMIT 1", tx_id):
+        if tx_id in done or tx_id in failed:
             if not blocked:
                 safe = max(safe, block_ts)
             continue
         info = await tron.solid_info(tx_id)
         if info is None:
-            blocked = True            # 아직 확정 전 → 커서는 여기서 멈춤
+            blocked = True            # 아직 확정 전 → 커서는 여기서 멈춤 (다음 차례에 다시)
             continue
-        transfers = transfers_from_info(info)
-        if not transfers:
-            failed.add(tx_id)         # 실패한 tx 거나 USDT 이동 없음
-            log.info("확정됐지만 USDT 이동 없음/실패: %s", tx_id)
-        for idx, t in enumerate(transfers):
-            ts = datetime.fromtimestamp(t.block_ts / 1000, timezone.utc)
-            if t.to_addr == pay and t.from_addr != pay:
-                bl = await tron.is_blacklisted(t.from_addr)
-                async with db.tx() as c:
-                    r = await core.record_incoming(c, ctx, t.tx_id, idx, t.from_addr, t.to_addr, t.amount, ts, bl)
-            elif t.from_addr == pay and t.to_addr != pay:
-                async with db.tx() as c:
-                    r = await core.record_outgoing(c, ctx, t.tx_id, idx, t.from_addr, t.to_addr, t.amount, ts)
-            else:
-                continue
-            log.info("tx %s #%d %s %s USDT → %s", t.tx_id[:12], idx, "입금" if t.to_addr == pay else "출금", fmt(t.amount), r)
-            new += r != "dup"
+        try:
+            new += await _record_tx(db, ctx, tron, pay, info)
+            done.add(tx_id)
+        except Exception as e:   # noqa: BLE001
+            log.exception("tx 처리 실패 %s", tx_id)
+            failed.add(tx_id)
+            async with db.tx() as c:
+                await core.say_admins(c, ctx, f"⚠️ 감시가 이 tx 를 처리하지 못했어요. 관리 페이지에서 직접 확인해주세요.\n"
+                                              f"<code>{tx_id}</code>\n{type(e).__name__}")
         if not blocked:
             safe = max(safe, block_ts)
     if safe > cursor:
         await set_cursor(db, safe)
+    if len(done) > 20000:
+        done.clear()
+    return new
+
+
+async def _record_tx(db: DB, ctx: core.Ctx, tron: TronGrid, pay: str, info: dict) -> int:
+    transfers = transfers_from_info(info)
+    if not transfers:
+        log.info("확정됐지만 USDT 이동 없음/실패: %s", info.get("id"))
+        return 0
+    new = 0
+    for idx, t in enumerate(transfers):
+        ts = datetime.fromtimestamp(t.block_ts / 1000, timezone.utc)
+        if t.to_addr == pay and t.from_addr != pay:
+            bl = await tron.is_blacklisted(t.from_addr)
+            async with db.tx() as c:
+                r = await core.record_incoming(c, ctx, t.tx_id, idx, t.from_addr, t.to_addr, t.amount, ts, bl)
+        elif t.from_addr == pay and t.to_addr != pay:
+            async with db.tx() as c:
+                r = await core.record_outgoing(c, ctx, t.tx_id, idx, t.from_addr, t.to_addr, t.amount, ts)
+        else:
+            continue
+        log.info("tx %s #%d %s %s USDT → %s", t.tx_id[:12], idx, "입금" if t.to_addr == pay else "출금", fmt(t.amount), r)
+        new += r != "dup"
     return new
 
 
@@ -97,6 +116,7 @@ async def run(cfg) -> None:
     ctx = core.Ctx(cfg)
     tron = TronGrid(cfg.trongrid_url, cfg.trongrid_key)
     failed: set[str] = set()
+    done: set[str] = set()
     last_health = 0.0
     if not cfg.can_take_deposits:
         log.warning("PAY_ADDRESS 가 STUB 이라 감시 안 함 — .env 채우고 다시 켜주세요")
@@ -106,7 +126,7 @@ async def run(cfg) -> None:
     backoff = 5
     while True:
         try:
-            await scan_once(db, ctx, tron, failed)
+            await scan_once(db, ctx, tron, failed, done)
             if time.time() - last_health > 3600:
                 last_health = time.time()
                 await health_check(db, ctx, tron)

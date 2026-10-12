@@ -117,7 +117,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await is_banned(db, uid):
         await send(context, uid, T.BANNED.format(support=T.esc(cfg.support)))
         return
-    await db.execute("DELETE FROM inputs WHERE tg_id=$1", uid)
+    await db.execute("DELETE FROM inputs WHERE tg_id=$1 AND kind <> 'address'", uid)
     arg = (context.args[0] if context.args else "").strip()
     if arg.startswith("join_"):
         try:
@@ -132,6 +132,17 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send(context, uid, T.tutorial(0, core.DEFAULTS["fee_micro"], cfg.support), tut_kb(0))
     else:
         await show_main(context, uid)
+    await remind_addresses(context, uid)
+
+
+async def remind_addresses(context, uid: int):
+    """받을 주소를 아직 안 준 지급이 있으면 다시 알림 (입력 대기가 지워졌어도 버튼으로 다시)."""
+    db, _, _ = svc(context)
+    async with db.tx() as c:
+        rows = await core.pending_addresses(c, uid)
+    for po in rows:
+        await send(context, uid, f"받을 주소가 아직 없어요. (거래 <code>{po['code']}</code>, {fmt(po['amount_micro'])} USDT)",
+                   core.kb_address(po["id"]))
 
 
 def tut_kb(i: int):
@@ -278,6 +289,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, arg: str):
             await core.set_input(c, uid, "partner", None, None, 10)
         await q.answer()
         await send(context, uid, T.ASK_PARTNER, [[("메뉴로", "menu:home")]])
+        await remind_addresses(context, uid)
         return
     kind = {"active": "active", "done": "done", "refund": "refund"}.get(arg)
     if not kind:
@@ -298,39 +310,42 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, arg: str):
 
 # ── 거래 버튼 ─────────────────────────────────────────
 async def on_deal(update: Update, context: ContextTypes.DEFAULT_TYPE, parts: list[str]):
+    """거래 버튼. DB 일은 한 트랜잭션에서 끝내고, 텔레그램 응답(answer·버튼 지우기·1:1 안내)은 커밋 뒤에
+    (텔레그램 호출이 실패해도 이미 한 일이 되돌아가지 않게 — 재시작 뒤 오래된 버튼 응답 실패 등)."""
     q = update.callback_query
     db, ctx, cfg = svc(context)
     uid = q.from_user.id
-    act = parts[0]
+    act = parts[0] if parts else ""
     try:
         if act == "sp":                         # d:sp:<how>:<deal>
             how, deal_id = parts[1], int(parts[2])
         else:
-            deal_id = int(parts[1])
+            deal_id = int(parts[1])             # d:addr:<지급 id> 는 지급 id
     except (IndexError, ValueError):
         await q.answer(T.STALE)
         return
     if await is_banned(db, uid):
         await q.answer(T.BANNED.format(support=cfg.support)[:190], show_alert=True)
         return
+    answer: str | None = None
+    drop: tuple[bool, str | None] = (False, None)
+    dms: list[tuple[str, list | None]] = []
     try:
         async with db.tx() as c:
             if act in ("acc", "dec"):
                 await core.answer_invite(c, ctx, deal_id, uid, act == "acc")
-                note = "수락했어요." if act == "acc" else "거절했어요."
-                await q.answer(note)
-                await drop_buttons(q, note)
-                return
-            if act == "ntc":
+                answer = "수락했어요." if act == "acc" else "거절했어요."
+                drop = (True, answer)
+            elif act == "ntc":
                 await core.ack_notice(c, ctx, deal_id, uid)
             elif act == "nfull":
-                await q.answer()
-                await send(context, uid, T.NOTICE_FULL)
-                return
+                dms.append((T.NOTICE_FULL, None))
             elif act in ("dep", "nodep"):
                 await core.choose(c, ctx, deal_id, uid, act == "dep")
             elif act == "part":
                 d = await c.fetchrow("SELECT * FROM deals WHERE id=$1", deal_id)
+                if not d:
+                    raise core.Refused(T.NOTHING)
                 core._party(d, uid)
                 core._expect(d, "FUNDED")
                 bal = await core.balances(c, deal_id)
@@ -339,51 +354,63 @@ async def on_deal(update: Update, context: ContextTypes.DEFAULT_TYPE, parts: lis
                 if room_for <= 0:
                     raise core.Refused("먼저 보낼 수 있는 내 잔액이 없어요.")
                 await core.set_input(c, uid, "partial", deal_id, None, 10)
-                other = await core.label(c, core._other(d, uid))
-                await q.answer("1:1 로 금액을 물어볼게요.")
-                await send(context, uid, T.partial_ask(d["code"], other, mine, room_for), [[("그만두기", f"d:inx:{deal_id}")]])
-                return
+                answer = "1:1 로 금액을 물어볼게요."
+                dms.append((T.partial_ask(d["code"], await core.label(c, core._other(d, uid)), mine, room_for),
+                            [[("그만두기", f"d:inx:{deal_id}")]]))
             elif act == "fin":
                 d, _ = await core.press_complete(c, ctx, deal_id, uid, False)
-                await q.answer()
-                await send(context, uid, T.complete_confirm(d["code"]), core.kb_complete_confirm(deal_id))
-                return
-            elif act in ("finy", "finn"):
-                await drop_buttons(q)
-                if act == "finn":
-                    await q.answer("취소했어요.")
-                    return
+                dms.append((T.complete_confirm(d["code"]), core.kb_complete_confirm(deal_id)))
+            elif act == "finn":
+                answer, drop = "취소했어요.", (True, None)
+            elif act == "finy":
                 await core.press_complete(c, ctx, deal_id, uid, True)
+                drop = (True, None)
+            elif act == "sp" and how == "custom":
+                d = await c.fetchrow("SELECT * FROM deals WHERE id=$1", deal_id)
+                if not d:
+                    raise core.Refused(T.NOTHING)
+                core._party(d, uid)
+                core._expect(d, "SPLIT")
+                total = sum((await core.balances(c, deal_id)).values())
+                await core.set_input(c, uid, "custom", deal_id, None, 10)
+                answer = "1:1 로 금액을 물어볼게요."
+                dms.append((T.ask_custom(d["code"], await core.label(c, d["creator"]), total), None))
             elif act == "sp":
-                if how == "custom":
-                    d = await c.fetchrow("SELECT * FROM deals WHERE id=$1", deal_id)
-                    core._party(d, uid)
-                    core._expect(d, "SPLIT")
-                    total = sum((await core.balances(c, deal_id)).values())
-                    await core.set_input(c, uid, "custom", deal_id, None, 10)
-                    await q.answer("1:1 로 금액을 물어볼게요.")
-                    await send(context, uid, T.ask_custom(d["code"], await core.label(c, d["creator"]), total))
-                    return
                 await core.propose_split(c, ctx, deal_id, uid, how)
             elif act in ("spok", "spno"):
                 await core.answer_split(c, ctx, deal_id, int(parts[2]), uid, act == "spok")
-                await drop_buttons(q, "동의했어요." if act == "spok" else "다시 정하기로 했어요.")
+                drop = (True, "동의했어요." if act == "spok" else "다시 정하기로 했어요.")
             elif act == "cx":
                 await core.request_cancel(c, ctx, deal_id, uid)
             elif act in ("cxok", "cxno"):
                 await core.answer_cancel(c, ctx, deal_id, uid, act == "cxok")
-                await drop_buttons(q)
+                drop = (True, None)
             elif act == "sos":
                 await core.open_dispute(c, ctx, deal_id, uid)
+            elif act == "addr":
+                po = await core.reopen_address(c, deal_id, uid)
+                dms.append((T.ask_address(po["code"], po["amount_micro"], 1), None))
             elif act == "inx":
-                await c.execute("DELETE FROM inputs WHERE tg_id=$1", uid)
-                await drop_buttons(q, "그만뒀어요.")
+                await c.execute("DELETE FROM inputs WHERE tg_id=$1 AND kind <> 'address'", uid)
+                drop = (True, "그만뒀어요.")
             else:
-                await q.answer(T.STALE)
-                return
-        await q.answer()
+                answer = T.STALE
     except core.Refused as e:
-        await q.answer(str(e)[:190], show_alert=True)
+        await _safe(q.answer(str(e)[:190], show_alert=True))
+        return
+    await _safe(q.answer(answer))
+    if drop[0]:
+        await drop_buttons(q, drop[1])
+    for text, rows in dms:
+        await send(context, uid, text, rows)
+
+
+async def _safe(coro):
+    """텔레그램 응답 실패는 무시 (이미 DB 는 커밋됨)."""
+    try:
+        await coro
+    except TelegramError as e:
+        log.info("응답 실패(무시): %r", e)
 
 
 # ── 관리자 버튼 ───────────────────────────────────────
@@ -435,6 +462,7 @@ async def on_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     inp = await db.fetchrow("SELECT * FROM inputs WHERE tg_id=$1 AND expires_at > now()", uid)
     if not inp:
         await show_main(context, uid)
+        await remind_addresses(context, uid)
         return
     if text in ("취소", "그만", "/cancel") and inp["kind"] != "address":
         await db.execute("DELETE FROM inputs WHERE tg_id=$1", uid)

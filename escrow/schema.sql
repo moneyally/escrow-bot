@@ -106,7 +106,8 @@ CREATE TABLE IF NOT EXISTS payouts (
     kind        TEXT NOT NULL CHECK (kind IN ('partial', 'final', 'refund')),
     gross_micro BIGINT NOT NULL CHECK (gross_micro > 0),
     fee_micro   BIGINT NOT NULL DEFAULT 0 CHECK (fee_micro >= 0),
-    amount_micro BIGINT NOT NULL CHECK (amount_micro > 0),
+    amount_micro BIGINT NOT NULL CHECK (amount_micro >= 0),        -- 0 = 받을 몫이 전부 수수료 (보낼 것 없음, 바로 confirmed)
+    debits      JSONB NOT NULL DEFAULT '{}',                    -- 누구 몫에서 얼마 나갔나 {"<tg_id>": 마이크로}, 합계 = gross
     address     TEXT,
     status      TEXT NOT NULL CHECK (status IN ('need_address', 'review', 'approved', 'sent', 'confirmed', 'cancelled')),
     tx_id       TEXT UNIQUE,
