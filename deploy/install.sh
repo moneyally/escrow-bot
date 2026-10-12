@@ -9,17 +9,19 @@ REPO=${REPO:-https://github.com/moneyally/escrow-bot.git}
 [ "$(id -u)" = 0 ] || { echo "root 로 실행"; exit 1; }
 [ -n "$DOMAIN" ] || { echo "사용: bash install.sh admin.도메인 (도메인 없으면 서버IP를 점 대신 - 로: 1-2-3-4.sslip.io)"; exit 1; }
 
-apt-get update -q
-DEBIAN_FRONTEND=noninteractive apt-get install -yq postgresql python3-venv python3-pip git ufw debian-keyring \
+APT="apt-get -o DPkg::Lock::Timeout=600"
+$APT update -q
+DEBIAN_FRONTEND=noninteractive $APT install -yq postgresql python3-venv python3-pip git ufw debian-keyring \
     debian-archive-keyring apt-transport-https curl
 if ! command -v caddy >/dev/null; then
   curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/gpg.key | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
   curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt > /etc/apt/sources.list.d/caddy-stable.list
-  apt-get update -q && apt-get install -yq caddy
+  $APT update -q && $APT install -yq caddy
 fi
 
 id escrow >/dev/null 2>&1 || useradd --system --home "$APP" --shell /usr/sbin/nologin escrow
-if [ ! -d "$APP/.git" ]; then git clone "$REPO" "$APP"; fi
+# 코드: 이미 올라와 있으면(부트스트랩 업로드) 그대로, 없으면 저장소에서
+if [ ! -d "$APP/escrow" ]; then git clone "$REPO" "$APP"; fi
 chown -R escrow: "$APP"
 sudo -u escrow python3 -m venv "$APP/.venv"
 sudo -u escrow "$APP/.venv/bin/pip" install -q -r "$APP/requirements.txt"
@@ -50,6 +52,9 @@ chown escrow: "$APP/.env"; chmod 600 "$APP/.env"
 cp "$APP"/deploy/escrow-*.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable -q escrow-bot escrow-watcher escrow-admin
+systemctl restart escrow-admin escrow-watcher
+# 봇은 BOT_TOKEN 이 있어야 켬 (없으면 계속 재시작만 함)
+if grep -qE '^BOT_TOKEN=.+' "$APP/.env"; then systemctl restart escrow-bot; fi
 
 cat > /etc/caddy/Caddyfile <<CADDY
 $DOMAIN {
@@ -60,7 +65,10 @@ $DOMAIN {
         X-Content-Type-Options "nosniff"
         Referrer-Policy "no-referrer"
     }
-    reverse_proxy 127.0.0.1:8090
+$( [ -n "${BOOT_ROUTE:-}" ] && printf '    handle_path /_boot/* {  # boot\n        reverse_proxy 127.0.0.1:8099  # boot\n    }  # boot\n' )
+    handle {
+            reverse_proxy 127.0.0.1:8090
+    }
 }
 CADDY
 systemctl reload caddy || systemctl restart caddy
