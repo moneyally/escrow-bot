@@ -292,7 +292,10 @@ async def test_cancel_after_money_needs_both_then_refund(users, ctx):
     d = await db.fetchrow("SELECT * FROM deals WHERE id=$1", d["id"])
     assert d["state"] == "REFUND"
     pos = {p["tg_id"]: p for p in await db.fetch("SELECT * FROM payouts WHERE deal_id=$1", d["id"])}
-    assert pos[A]["gross_micro"] == slots[A]["amount_micro"] and pos[A]["fee_micro"] == 0    # 환불 수수료 기본 0
+    assert pos[A]["gross_micro"] == slots[A]["amount_micro"]
+    assert sum(p["fee_micro"] for p in pos.values()) == 15 * U, "환불 수수료 15 USDT (예치 비율대로 나눔)"
+    assert abs(pos[A]["fee_micro"] - 12500000) <= 1 and abs(pos[B]["fee_micro"] - 2500000) <= 1      # 1000:200 비율
+    assert any("수수료 15 USDT 를 빼고" in r["text"] for r in await outbox(db, A))
     await give_addresses(db, ctx, d)
     [ap] = await approvals(db, "refund")
     async with db.tx() as c:

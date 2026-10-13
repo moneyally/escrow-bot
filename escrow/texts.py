@@ -113,7 +113,7 @@ def fee_rule(fee: int, bp: int = 0, cap: int = 0) -> str:
 
 
 def notice(code: str, a: str, b: str, fee: int, minimum: int, support: str, bot_username: str = "", fee_bp: int = 0,
-           fee_cap: int = 0) -> str:
+           fee_cap: int = 0, refund_fee: int = 0) -> str:
     official = f"· 공식 봇은 @{esc(bot_username)} 하나뿐이에요. 이름이 비슷한 봇·계정은 사칭입니다.\n" if bot_username else ""
     return (f"<b>공지</b>\n{LINE}\n거래코드: <code>{code}</code>\n{a} · {b}\n{LINE}\n\n"
             f"· 수수료는 {fee_rule(fee, fee_bp, fee_cap)}, 받는 금액에서 빠져요.\n"
@@ -121,6 +121,7 @@ def notice(code: str, a: str, b: str, fee: int, minimum: int, support: str, bot_
             "· 입금 주소와 정확한 금액은 봇 1:1 로만 보냅니다. 여기 올라온 주소로는 보내지 마세요.\n"
             "· 물건이나 작업을 확인한 뒤에만 [거래완료].\n"
             "· 단계마다 30분 안에 응답이 없으면 자동으로 취소돼요. 예치금이 있으면 환불 대기로 넘어갑니다.\n"
+            + (f"· 취소·{refund_fee_line(refund_fee)}\n" if refund_fee > 0 else "") +
             "· 관리자는 먼저 DM 하지 않아요.\n" + official + "\n"
             f"두 분 다 [공지 확인]을 눌러야 다음으로 넘어갑니다.\n문의: {esc(support)}")
 
@@ -262,17 +263,24 @@ def cancel_done(code: str, reason: str = "") -> str:
     return f"거래가 취소됐어요. (<code>{code}</code>)" + (f"\n{esc(reason)}" if reason else "")
 
 
-def cancel_asked(code: str, who_: str) -> str:
+def refund_fee_line(fee: int) -> str:
+    return f"환불할 땐 수수료 {fmt(fee)} USDT 를 빼고 돌려드려요." if fee > 0 else ""
+
+
+def cancel_asked(code: str, who_: str, fee: int = 0) -> str:
+    extra = f" ({refund_fee_line(fee)})" if fee > 0 else ""
     return (f"{who_} 님이 거래 취소를 요청했어요. (<code>{code}</code>)\n"
-            "동의하면 예치금은 각자에게 돌려드립니다.")
+            f"동의하면 예치금은 각자에게 돌려드립니다.{extra}")
 
 
-def refund_wait(code: str) -> str:
-    return (f"예치금을 돌려드릴게요. (<code>{code}</code>)\n받을 주소를 1:1 로 물어볼게요.")
+def refund_wait(code: str, fee: int = 0) -> str:
+    what = f"예치금에서 수수료 {fmt(fee)} USDT 를 빼고 돌려드릴게요." if fee > 0 else "예치금을 돌려드릴게요."
+    return f"{what} (<code>{code}</code>)\n받을 주소를 1:1 로 물어볼게요."
 
 
-def expired(code: str, refunded: bool) -> str:
-    tail = "\n예치금은 환불 대기로 넘어갔어요. 1:1 로 받을 주소를 물어볼게요." if refunded else ""
+def expired(code: str, refunded: bool, fee: int = 0) -> str:
+    tail = (f"\n예치금은 환불 대기로 넘어갔어요{f' (수수료 {fmt(fee)} USDT 차감)' if fee > 0 else ''}. "
+            "1:1 로 받을 주소를 물어볼게요.") if refunded else ""
     return f"30분 동안 응답이 없어서 거래를 멈췄어요. (<code>{code}</code>){tail}"
 
 

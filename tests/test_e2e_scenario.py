@@ -62,7 +62,7 @@ async def test_one_usdt_deal_end_to_end(users):
     w = World(db)
     env, bot = w.env, w.env.bot
     print("\n[1 USDT 모의 거래]")
-    r = await w.admin.put("/api/settings", json={"min_micro": 1 * MICRO, "fee_micro": MICRO // 10})
+    r = await w.admin.put("/api/settings", json={"min_micro": 1 * MICRO, "fee_micro": MICRO // 10, "refund_fee_micro": 0})
     assert r.status_code == 200, r.text
     say("관리 페이지: 최소 예치 1 USDT · 수수료 0.1 USDT 로 설정")
 
@@ -143,7 +143,7 @@ async def test_one_usdt_wrong_amount_then_admin_links_it(users):
     w = World(db)
     env = w.env
     print("\n[끝자리 틀린 입금]")
-    await w.admin.put("/api/settings", json={"min_micro": 1 * MICRO, "fee_micro": MICRO // 10})
+    await w.admin.put("/api/settings", json={"min_micro": 1 * MICRO, "fee_micro": MICRO // 10, "refund_fee_micro": 0})
     for who in (A, B):
         await env.start(who)
         await env.press(who, "t:skip")
@@ -177,7 +177,7 @@ async def test_one_usdt_cancel_refund(users):
     w = World(db)
     env = w.env
     print("\n[취소 → 환불]")
-    await w.admin.put("/api/settings", json={"min_micro": 1 * MICRO, "fee_micro": MICRO // 10})
+    await w.admin.put("/api/settings", json={"min_micro": 1 * MICRO, "fee_micro": MICRO // 10, "refund_fee_micro": 0})
     for who in (A, B):
         await env.start(who)
         await env.press(who, "t:skip")

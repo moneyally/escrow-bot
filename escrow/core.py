@@ -35,7 +35,7 @@ DEFAULTS = {
     "fee_max_micro": 0,           # 비율 방식 최대 (0 = 없음)
     "max_held_micro": 0,          # 지갑에 동시에 보관할 수 있는 최대 (0 = 제한 없음) — 주소 하나에 몰리는 위험 한도
     "min_micro": 50 * MICRO,
-    "refund_fee_micro": 0,
+    "refund_fee_micro": 15 * MICRO,  # 취소·환불할 때 빼는 수수료 (거래당, 돌려받는 사람들 예치 비율대로 나눔)
     "stage_minutes": 30,
     "slot_minutes": 30,
     "slot_grace_minutes": 10,     # 안내한 시간보다 조금 늦게 확정돼도 인정
@@ -445,7 +445,7 @@ async def _enter_notice(c, ctx: Ctx, d, actor):
     d = await _set_state(c, d, "NOTICE", actor, int(st["stage_minutes"]))
     await say_deal(c, d, T.notice(d["code"], await label(c, d["creator"]), await label(c, d["partner"]),
                                   d["fee_micro"], int(st["min_micro"]), ctx.cfg.support, ctx.cfg.bot_username,
-                                  d["fee_bp"], d["fee_max_micro"]), kb_notice(d["id"]))
+                                  d["fee_bp"], d["fee_max_micro"], int(st["refund_fee_micro"])), kb_notice(d["id"]))
     return d
 
 
@@ -1171,8 +1171,9 @@ async def request_cancel(c, ctx: Ctx, deal_id: int, tg_id: int):
     rows = await c.fetch("SELECT cancel_req FROM deal_parties WHERE deal_id=$1", deal_id)
     if all(r["cancel_req"] for r in rows) and len(rows) == 2:
         return await _open_refund(c, ctx, d, tg_id)
-    await say(c, _other(d, tg_id), T.cancel_asked(d["code"], await label(c, tg_id)), kb_cancel_agree(deal_id), deal_id)
-    await say_deal(c, d, T.cancel_asked(d["code"], await label(c, tg_id)))
+    rfee = int((await settings(c))["refund_fee_micro"])
+    await say(c, _other(d, tg_id), T.cancel_asked(d["code"], await label(c, tg_id), rfee), kb_cancel_agree(deal_id), deal_id)
+    await say_deal(c, d, T.cancel_asked(d["code"], await label(c, tg_id), rfee))
     return d
 
 
@@ -1214,7 +1215,7 @@ async def _open_refund(c, ctx: Ctx, d, actor: int, reopen: bool = False, reason:
         fee = max(fee, int(d["fee_micro"]))      # 일부라도 정산이 나간 거래 = 거래가 된 것 → 거래 수수료 (부분 지급 뒤 취소로 수수료 피하기 막음)
         fee -= int(await c.fetchval("SELECT coalesce(sum(fee_micro),0) FROM payouts WHERE deal_id=$1 AND status <> 'cancelled'", d["id"]))
         fee = max(0, fee)
-    await say_deal(c, d, T.refund_wait(d["code"]))
+    await say_deal(c, d, T.refund_wait(d["code"], fee))
     await _make_payouts(c, ctx, d, sp["id"], plan, "refund", fee)
     return d
 
@@ -1382,7 +1383,7 @@ async def _expire_one(c, ctx: Ctx, deal_id: int) -> int:
                     "SELECT count(*) FROM approvals WHERE deal_id=$1 AND kind='deposit' AND status IN ('pending','held')", deal_id):
                 return 0   # 관리자 입금 확인 기다리는 중 → 손님 잘못 아님
             if await held(c, deal_id, MONEY_HELD):
-                await say_deal(c, d, T.expired(d["code"], True))
+                await say_deal(c, d, T.expired(d["code"], True, int((await settings(c))["refund_fee_micro"])))
                 await _open_refund(c, ctx, d, 0, reason="expired")
             else:
                 d = await _set_state(c, d, "CANCELLED", 0, close_reason="expired")
@@ -1443,7 +1444,8 @@ async def screen(c, ctx: Ctx, d):
     code, s = d["code"], d["state"]
     if s == "NOTICE":
         return (T.notice(code, await label(c, d["creator"]), await label(c, d["partner"]), d["fee_micro"], int(st["min_micro"]),
-                         ctx.cfg.support, ctx.cfg.bot_username, d["fee_bp"], d["fee_max_micro"]), kb_notice(d["id"]))
+                         ctx.cfg.support, ctx.cfg.bot_username, d["fee_bp"], d["fee_max_micro"],
+                         int(st["refund_fee_micro"])), kb_notice(d["id"]))
     if s == "CHOOSE":
         rows = await c.fetch("SELECT tg_id, choice FROM deal_parties WHERE deal_id=$1 ORDER BY role", d["id"])
         return T.choose(code, [(await label(c, r["tg_id"]), r["choice"]) for r in rows]), kb_choose(d["id"])
