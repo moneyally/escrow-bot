@@ -299,3 +299,8 @@ def adm_approval(kind_label: str, code: str, body: str) -> str:
 
 ADM_KIND = {"deposit": "입금 확인", "start": "거래 시작", "partial": "부분 지급", "final": "최종 정산",
             "refund": "환불", "payout_done": "송금 완료 확인"}
+
+
+def address_again(code: str, reason: str) -> str:
+    why = f"\n사유: {esc(reason)}" if reason.strip() else ""
+    return f"<code>{code}</code> 받을 주소를 다시 받을게요. 아직 보내지 않았으니 걱정 마세요.{why}"

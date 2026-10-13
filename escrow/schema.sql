@@ -110,13 +110,18 @@ CREATE TABLE IF NOT EXISTS payouts (
     debits      JSONB NOT NULL DEFAULT '{}',                    -- 누구 몫에서 얼마 나갔나 {"<tg_id>": 마이크로}, 합계 = gross
     address     TEXT,
     status      TEXT NOT NULL CHECK (status IN ('need_address', 'review', 'approved', 'sent', 'confirmed', 'cancelled')),
-    tx_id       TEXT UNIQUE,
+    tx_id       TEXT,
+    tx_idx      INT,                         -- 그 tx 안 몇 번째 Transfer (묶음 송금). 관리자가 해시만 넣으면 NULL → 감시가 채움
     approved_by BIGINT,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     CHECK (amount_micro = gross_micro - fee_micro)
 );
 CREATE INDEX IF NOT EXISTS payouts_status ON payouts (status);
+-- 옛 표 고치기 (tx_id 하나에 지급 하나 → (tx_id, tx_idx))
+ALTER TABLE payouts ADD COLUMN IF NOT EXISTS tx_idx INT;
+ALTER TABLE payouts DROP CONSTRAINT IF EXISTS payouts_tx_id_key;
+CREATE UNIQUE INDEX IF NOT EXISTS payouts_tx ON payouts (tx_id, tx_idx) WHERE tx_idx IS NOT NULL;
 
 -- 관리자 확인 대기 (단계별 수동 모드). 같은 대상에 열린 건 하나만.
 CREATE TABLE IF NOT EXISTS approvals (

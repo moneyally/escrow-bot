@@ -20,7 +20,7 @@ from pydantic import BaseModel
 from .. import config as cfgmod
 from .. import core
 from ..db import DB
-from ..money import fmt, parse_usdt
+from ..money import fmt, fmt_exact, parse_usdt
 
 STATIC = Path(__file__).with_name("static")       # 예전 단일 HTML (React 빌드가 없을 때만)
 WEB = Path(__file__).with_name("web")             # admin-web(React) 빌드 결과 — npm run build
@@ -309,7 +309,7 @@ def create_app(cfg=None, database: DB | None = None) -> FastAPI:
         rows = await db().fetch("SELECT p.*, d.code, u.username FROM payouts p JOIN deals d ON d.id=p.deal_id JOIN users u ON u.tg_id=p.tg_id "
                                 "WHERE ($1 = '' OR p.status=$1) ORDER BY p.id DESC LIMIT 300", status)
         return [{"id": r["id"], "code": r["code"], "user": r["username"] or r["tg_id"], "kind": r["kind"], "status": r["status"],
-                 "address": r["address"], "amount": fmt(r["amount_micro"]), "amount_exact": str(r["amount_micro"] / 1_000_000),
+                 "address": r["address"], "amount": fmt(r["amount_micro"]), "amount_exact": fmt_exact(r["amount_micro"]),
                  "fee": fmt(r["fee_micro"]), "tx_id": r["tx_id"]} for r in rows]
 
 
@@ -317,6 +317,12 @@ def create_app(cfg=None, database: DB | None = None) -> FastAPI:
     async def payout_done(pid: int, body: Done, tg: int = Depends(admin)):
         await run(core.mark_payout_sent, pid, body.tx_id, tg)
         return {"result": "완료 처리했어요."}
+
+    @app.post("/api/payouts/{pid}/cancel")
+    async def payout_cancel(pid: int, body: Reason, tg: int = Depends(admin)):
+        """아직 안 보낸 지급 취소 → 받는 사람에게 주소를 다시 물음 (주소가 틀렸을 때)."""
+        await run(core.cancel_payout, pid, tg, body.reason[:100])
+        return {"result": "취소했어요. 받는 분에게 주소를 다시 물어봤어요."}
 
     # ── 사용자 ──
     @app.get("/api/users/{key}")

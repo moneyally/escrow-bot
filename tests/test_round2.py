@@ -87,3 +87,135 @@ async def test_c5_assign_after_watcher_matched_is_refused(users, ctx):
     except core.Refused:
         pass
     assert (await db.fetchval("SELECT status FROM chain_tx WHERE tx_id='odd1'")) == "unmatched"
+
+
+from test_core import approvals, finish_split, give_addresses, to_funded   # noqa: E402
+from conftest import ADDR   # noqa: E402
+
+
+async def _approve_all(db, ctx, kind):
+    for ap in await approvals(db, kind):
+        async with db.tx() as c:
+            await core.decide(c, ctx, ap["id"], ADMIN, True)
+
+
+async def _send_all(db, ctx, deal_id, tx="out"):
+    for i, p in enumerate(await db.fetch("SELECT * FROM payouts WHERE deal_id=$1 AND status='approved' ORDER BY id", deal_id)):
+        async with db.tx() as c:
+            assert await core.record_outgoing(c, ctx, f"{tx}{p['id']}", 0, PAY, p["address"], p["amount_micro"], ts()) == "matched"
+    await _approve_all(db, ctx, "payout_done")
+
+
+async def test_c2_admin_can_cancel_approved_payout_and_reask_address(users, ctx):
+    db = users
+    d, _ = await to_funded(db, ctx, 1000 * U, 500 * U)
+    await finish_split(db, ctx, d, "each")
+    await give_addresses(db, ctx, d)
+    await _approve_all(db, ctx, "final")
+    po = await db.fetchrow("SELECT * FROM payouts WHERE deal_id=$1 AND tg_id=$2 AND status='approved'", d["id"], A)
+    async with db.tx() as c:
+        new = await core.cancel_payout(c, ctx, po["id"], ADMIN, "주소 오타")
+    assert (await db.fetchval("SELECT status FROM payouts WHERE id=$1", po["id"])) == "cancelled"
+    assert new["status"] == "need_address" and new["amount_micro"] == po["amount_micro"] and new["debits"] == po["debits"]
+    # 장부: 취소 안 된 지급의 합 = 맡긴 돈 그대로
+    gross = await db.fetchval("SELECT sum(gross_micro) FROM payouts WHERE deal_id=$1 AND status<>'cancelled'", d["id"])
+    assert gross == await db.fetchval("SELECT sum(amount_micro) FROM deposit_slots WHERE deal_id=$1 AND status='confirmed'", d["id"])
+    async with db.tx() as c:
+        await core.set_address(c, ctx, new["id"], A, ADDR)
+    await _approve_all(db, ctx, "final")
+    await _send_all(db, ctx, d["id"])
+    assert (await db.fetchval("SELECT state FROM deals WHERE id=$1", d["id"])) == "DONE"
+
+
+async def test_c6_batch_transfer_matches_both_payouts(users, ctx):
+    """지갑에서 한 번에 두 건 보냄 (한 tx 에 Transfer 2개) → 둘 다 연결."""
+    db = users
+    d, _ = await to_funded(db, ctx, 1000 * U, 500 * U)
+    await finish_split(db, ctx, d, "each")
+    await give_addresses(db, ctx, d)
+    await _approve_all(db, ctx, "final")
+    p1, p2 = await db.fetch("SELECT * FROM payouts WHERE deal_id=$1 AND status='approved' ORDER BY id", d["id"])
+    async with db.tx() as c:
+        assert await core.record_outgoing(c, ctx, "batch", 0, PAY, p1["address"], p1["amount_micro"], ts()) == "matched"
+    async with db.tx() as c:
+        assert await core.record_outgoing(c, ctx, "batch", 1, PAY, p2["address"], p2["amount_micro"], ts()) == "matched"
+    assert [r["status"] for r in await db.fetch("SELECT status FROM payouts WHERE id = ANY($1) ORDER BY id", [p1["id"], p2["id"]])] == ["sent", "sent"]
+
+
+async def test_c4_partial_then_cancel_still_pays_fee(users, ctx):
+    db = users
+    d, _ = await to_funded(db, ctx, 1000 * U, 0)
+    async with db.tx() as c:
+        po = await core.partial(c, ctx, d["id"], A, 980 * U)
+    async with db.tx() as c:
+        await core.set_address(c, ctx, po["id"], B, ADDR)
+    await _approve_all(db, ctx, "partial")
+    await _send_all(db, ctx, d["id"], "p")
+    for who in (A, B):
+        async with db.tx() as c:
+            await core.request_cancel(c, ctx, d["id"], who)
+    fee = await db.fetchval("SELECT sum(fee_micro) FROM payouts WHERE deal_id=$1 AND kind='refund'", d["id"])
+    assert fee == 20 * U, "부분 지급 뒤 취소하면 수수료 0 이 됨"
+
+
+async def test_c8_late_deposit_after_dispute_decision_is_refunded(users, ctx):
+    """분쟁 결정(B 자리 취소) 뒤 B 가 늦게 보낸 돈을 관리자가 연결 → 정산 끝날 때 그 돈은 B 에게 환불 (DONE 에 돈이 남지 않게)."""
+    db = users
+    d = await to_choose(db, ctx)
+    for who in (A, B):
+        async with db.tx() as c:
+            await core.choose(c, ctx, d["id"], who, True)
+    async with db.tx() as c:
+        sa = await core.open_slot(c, ctx, d["id"], A, 100 * U)
+    async with db.tx() as c:
+        sb = await core.open_slot(c, ctx, d["id"], B, 100 * U)
+    async with db.tx() as c:
+        await core.record_incoming(c, ctx, "ina", 0, "TA", PAY, sa["amount_micro"], ts())
+    await _approve_all(db, ctx, "deposit")
+    async with db.tx() as c:
+        await core.open_dispute(c, ctx, d["id"], A)
+    async with db.tx() as c:
+        await core.resolve_dispute(c, ctx, d["id"], ADMIN, {A: sa["amount_micro"], B: 0})
+    async with db.tx() as c:
+        assert await core.record_incoming(c, ctx, "inb", 0, "TB", PAY, sb["amount_micro"], ts()) == "unmatched"
+    async with db.tx() as c:
+        await core.assign_deposit(c, ctx, "inb", 0, sb["id"], ADMIN)
+    await give_addresses(db, ctx, d)
+    await _approve_all(db, ctx, "final")
+    await _send_all(db, ctx, d["id"])
+    d2 = await db.fetchrow("SELECT * FROM deals WHERE id=$1", d["id"])
+    assert d2["state"] == "REFUND"
+    assert await db.fetchval("SELECT count(*) FROM payouts WHERE deal_id=$1 AND kind='refund' AND tg_id=$2", d["id"], B) == 1
+
+
+async def test_c10_dispute_without_money_ends_cancelled(users, ctx):
+    db = users
+    d = await to_choose(db, ctx)
+    async with db.tx() as c:
+        await core.open_dispute(c, ctx, d["id"], A)
+    async with db.tx() as c:
+        await core.resolve_dispute(c, ctx, d["id"], ADMIN, {A: 0, B: 0})
+    assert (await db.fetchval("SELECT state FROM deals WHERE id=$1", d["id"])) == "CANCELLED"
+
+
+async def test_c13_open_slots_per_person_are_limited(users, ctx):
+    db = users
+    for i in range(core.MAX_OPEN_SLOTS + 1):
+        d = await _deposit_stage(db, ctx)
+        if i < core.MAX_OPEN_SLOTS:
+            await _slot(db, ctx, d["id"])
+        else:
+            try:
+                await _slot(db, ctx, d["id"])
+                raise AssertionError("자리 수 제한 없음")
+            except core.Refused:
+                pass
+
+
+async def test_c14_room_never_sees_decimal_amount(users, ctx):
+    db = users
+    d, slots = await to_funded(db, ctx, 1000 * U, 0, room=True)
+    exact = core.fmt(slots[A]["amount_micro"])
+    room_texts = [r["text"] or "" for r in await db.fetch("SELECT text FROM outbox WHERE chat_id=-1001")]
+    deposit_msgs = [t for t in room_texts if "예치 완료" not in t]      # 시작 안내의 합계는 실제 맡긴 돈 그대로 보여 줌
+    assert deposit_msgs and not any(exact in t for t in deposit_msgs)

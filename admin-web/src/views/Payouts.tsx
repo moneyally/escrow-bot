@@ -24,6 +24,14 @@ export function Payouts({ nav, tick }: { nav: Nav; tick: number }) {
     catch (e) { if (e instanceof ApiError) ui.toast(e.message); }
   }
 
+  async function cancel(p: P) {
+    const reason = await ui.prompt({ title: "지급 취소", message: `${p.amount} USDT → @${p.user}\n아직 안 보낸 건만 취소돼요. 받는 분에게 주소를 다시 물어봐요.`,
+      confirm: "취소하기", placeholder: "사유 (받는 분에게 보여요)" });
+    if (reason === null) return;
+    try { const r = await post(`/api/payouts/${p.id}/cancel`, { reason }); ui.toast(r.result); nav.refresh(); }
+    catch (e) { if (e instanceof ApiError) ui.toast(e.message); }
+  }
+
   if (!todo) return null;
   return (
     <>
@@ -43,6 +51,7 @@ export function Payouts({ nav, tick }: { nav: Nav; tick: number }) {
             <div className="actions left">
               <Button tone="secondary" small onClick={() => copyText(p.address, ui)}>주소 복사</Button>
               <Button tone="secondary" small onClick={() => copyText(p.amount_exact, ui)}>금액 복사</Button>
+              <Button tone="destructive" small onClick={() => cancel(p)}>주소 틀림 · 취소</Button>
             </div>
             <div className="inline">
               <input className="field" placeholder="tx 해시 (자동 감지가 안 될 때만)" value={tx[p.id] || ""}
