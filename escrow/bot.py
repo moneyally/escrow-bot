@@ -783,6 +783,32 @@ async def expire_job(context: ContextTypes.DEFAULT_TYPE):
         log.info("시간 초과 정리 %d건", n)
 
 
+async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
+    """1분마다: 감시가 5분 넘게 멈췄으면 관리자에게 🚨 (한 시간에 한 번). 하루 한 번 장부 vs 지갑 보고."""
+    db, ctx, cfg = svc(context)
+    if not cfg.can_take_deposits:
+        return
+    now = int(datetime.now(timezone.utc).timestamp())
+    kv = {r["key"]: r["value"] for r in await db.fetch(
+        "SELECT key, value FROM kv WHERE key IN ('watch_alive','watch_alarm_at','daily_report_at','wallet_balance')")}
+    alive = int(kv.get("watch_alive") or 0)
+    if now - alive > 300 and now - int(kv.get("watch_alarm_at") or 0) > 3600:
+        async with db.tx() as c:
+            await core.say_admins(c, ctx, "🚨 <b>입금 감시가 멈췄어요</b> (5분 넘게 소식 없음). 입금·송금이 자동 확인되지 않아요.\n"
+                                          "서버의 escrow-watcher 를 확인해주세요." + ("" if alive else "\n(아직 한 번도 안 돌았어요)"))
+            await c.execute("INSERT INTO kv(key, value) VALUES('watch_alarm_at',$1) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value", now)
+    if now - int(kv.get("daily_report_at") or 0) > 24 * 3600:
+        async with db.tx() as c:
+            wb = kv.get("wallet_balance") or {}
+            s_ = await core.stats(c, wb.get("micro"))
+            diff = "" if wb.get("micro") is None else f" · 차이 {fmt(int(wb['micro']) - s_['ledger_micro'])}"
+            await core.say_admins(c, ctx, f"📋 <b>하루 보고</b>\n진행 중 {s_['active']} · 오늘 새 거래 {s_['today']} · 분쟁 {s_['disputes']}\n"
+                                          f"장부 {fmt(s_['ledger_micro'])} USDT · 지갑 "
+                                          f"{fmt(int(wb['micro'])) + ' USDT' if wb.get('micro') is not None else '조회 전'}{diff}\n"
+                                          f"확인 대기 {s_['pending_approvals']} · 보낼 것 {s_['payouts_to_send']} · 확인 필요 입금 {s_['unmatched_in']}")
+            await c.execute("INSERT INTO kv(key, value) VALUES('daily_report_at',$1) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value", now)
+
+
 # ── 관리자 명령 ───────────────────────────────────────
 async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db, ctx, cfg = svc(context)
@@ -865,6 +891,7 @@ async def post_init(app: Application):
         log.warning("아직 STUB: %s — .env 를 채워야 운영 가능", ", ".join(cfg.stub_fields))
     app.job_queue.run_repeating(outbox_job, interval=1.0, first=1)
     app.job_queue.run_repeating(expire_job, interval=30, first=10)
+    app.job_queue.run_repeating(monitor_job, interval=60, first=120)
     log.info("시작 @%s", me.username)
 
 

@@ -46,6 +46,7 @@ DEFAULTS = {
     "mode.payout_done": "manual",
 }
 MODES = ("deposit", "start", "partial", "final", "refund", "payout_done")
+SETTING_MIN = {"stage_minutes": 5, "slot_minutes": 10, "min_micro": 1 * MICRO}   # 0분 단계·0원 최소 같은 실수 막기
 _CODE_ABC = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
 
@@ -82,11 +83,13 @@ async def set_setting(c, key: str, value, admin: int) -> None:
     if key.startswith("mode.") and value not in ("manual", "auto"):
         raise Refused("manual 또는 auto")
     if isinstance(d, bool):
-        value = bool(value)
+        if not isinstance(value, bool):          # "false" 같은 글자가 True 로 바뀌지 않게
+            raise Refused(f"{key}: 켜기/끄기(true/false)만")
     elif isinstance(d, int):
-        value = int(value)
-        if value < 0:
-            raise Refused("0 이상")
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise Refused(f"{key}: 정수만")
+        if value < SETTING_MIN.get(key, 0):
+            raise Refused(f"{key}: {SETTING_MIN.get(key, 0)} 이상")
     await c.execute("INSERT INTO settings(key, value, updated_by) VALUES($1, $2, $3) "
                     "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_by=EXCLUDED.updated_by, updated_at=now()",
                     key, value, admin)

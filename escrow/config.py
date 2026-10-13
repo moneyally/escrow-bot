@@ -55,6 +55,10 @@ class Config:
             out.append("ADMIN_IDS")
         if self.pay_address == STUB_ADDRESS:
             out.append("PAY_ADDRESS")
+        elif not self.pay_address_ok:
+            out.append("PAY_ADDRESS(형식 틀림)")
+        if not self.trongrid_key:
+            out.append("TRONGRID_KEY")
         if self.bot_name == "에스크로":
             out.append("BOT_NAME")
         if self.support == "@support":
@@ -62,8 +66,13 @@ class Config:
         return out
 
     @property
+    def pay_address_ok(self) -> bool:
+        from .tron import is_address        # 체크섬까지 — 오타 주소로 손님 돈을 받는 일이 없게
+        return is_address(self.pay_address)
+
+    @property
     def can_take_deposits(self) -> bool:
-        return self.pay_address != STUB_ADDRESS
+        return self.pay_address != STUB_ADDRESS and self.pay_address_ok
 
 
 def load(env_file: str | None = None) -> Config:

@@ -219,3 +219,60 @@ async def test_c14_room_never_sees_decimal_amount(users, ctx):
     room_texts = [r["text"] or "" for r in await db.fetch("SELECT text FROM outbox WHERE chat_id=-1001")]
     deposit_msgs = [t for t in room_texts if "예치 완료" not in t]      # 시작 안내의 합계는 실제 맡긴 돈 그대로 보여 줌
     assert deposit_msgs and not any(exact in t for t in deposit_msgs)
+
+
+def test_o3_bad_pay_address_blocks_deposits():
+    from escrow.config import Config
+    bad = Config(pay_address="TR7sTzwA9nVfDiSyge8Ez7GJ6jFng7tVC2")      # 마지막 글자 오타 → 체크섬 틀림
+    good = Config(pay_address="TR7sTzwA9nVfDiSyge8Ez7GJ6jFng7tVC1")
+    assert not bad.can_take_deposits and "PAY_ADDRESS(형식 틀림)" in bad.stub_fields
+    assert good.can_take_deposits
+
+
+async def test_o4_failed_tx_is_retried_before_cursor_moves(users):
+    """처리 오류 tx 는 커서를 그 앞에 세워 두고 다시 시도 → 고쳐지면 자동 처리 (예전엔 커서가 넘어가 영영 빠짐)."""
+    import time as _t
+    from conftest import ADMIN as _ADMIN
+    from escrow import tron, watcher
+    from escrow.config import Config
+    from test_watch_admin import FakeTron, SENDER, info
+    db = users
+    pay = tron.USDT_CONTRACT
+    wctx = core.Ctx(Config(admin_ids=frozenset({_ADMIN}), pay_address=pay))
+    ft = FakeTron()
+    now_ms = int(_t.time() * 1000)
+    ft.cands = [("t1", now_ms)]
+    ft.infos["t1"] = info("t1", SENDER, pay, 9 * U, ts_ms=now_ms)
+    orig = core.record_incoming
+    calls = {"n": 0}
+
+    async def flaky(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("잠깐 DB 오류")
+        return await orig(*a, **k)
+    core.record_incoming = flaky
+    failed, done, tries = set(), set(), {}
+    try:
+        await watcher.set_cursor(db, now_ms - 1000)
+        before = await watcher.get_cursor(db)
+        await watcher.scan_once(db, wctx, ft, failed, done, tries)
+        assert await watcher.get_cursor(db) == before, "실패한 tx 를 두고 커서가 넘어감"
+        await watcher.scan_once(db, wctx, ft, failed, done, tries)
+    finally:
+        core.record_incoming = orig
+    assert await db.fetchval("SELECT count(*) FROM chain_tx WHERE tx_id='t1'") == 1 and not failed
+
+
+async def test_o11_settings_are_strict(users):
+    db = users
+    for key, bad in (("new_deals", "false"), ("stage_minutes", 0), ("fee_micro", "20"), ("min_micro", 0)):
+        try:
+            async with db.tx() as c:
+                await core.set_setting(c, key, bad, ADMIN)
+            raise AssertionError(f"{key}={bad!r} 가 통과됨")
+        except core.Refused:
+            pass
+    async with db.tx() as c:
+        await core.set_setting(c, "new_deals", False, ADMIN)
+        assert (await core.settings(c))["new_deals"] is False

@@ -153,3 +153,17 @@ async def test_d6_invite_shows_numeric_id_and_history(users):
     inv = [t for t in env.bot.texts(B) if "거래 요청" in t][-1]
     assert str(A) in inv and "끝낸 거래 0건" in inv
     assert ADDR  # (import 유지)
+
+
+async def test_d4_stopped_watcher_alerts_admin_once(users):
+    import time as _t
+    db = users
+    env = Env(db)
+    from escrow import bot as B_
+    await db.execute("INSERT INTO kv(key, value) VALUES('watch_alive', $1)", int(_t.time()) - 600)
+    await B_.monitor_job(env.context(0))
+    await B_.monitor_job(env.context(0))
+    await env.flush()
+    alerts = [t for t in env.bot.texts(ADMIN) if "감시가 멈췄어요" in t]
+    assert len(alerts) == 1
+    assert any("하루 보고" in t for t in env.bot.texts(ADMIN))
