@@ -70,10 +70,11 @@ def main_kb(cfg):
     return rows
 
 
-async def send(context, chat_id: int, text: str, rows=None):
+async def send(context, chat_id: int, text: str, rows=None, direct: bool = False):
+    bot = context if direct else context.bot
     try:
-        return await context.bot.send_message(chat_id, text, parse_mode=ParseMode.HTML, reply_markup=markup(rows),
-                                              disable_web_page_preview=True)
+        return await bot.send_message(chat_id, text, parse_mode=ParseMode.HTML, reply_markup=markup(rows),
+                                      disable_web_page_preview=True)
     except Forbidden:
         log.info("1:1 막힘 %s", chat_id)
     except TelegramError as e:
@@ -100,8 +101,14 @@ async def track_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not u or u.is_bot:
         return
     db, _, _ = svc(context)
+    chat = getattr(update, "effective_chat", None)
     async with db.tx() as c:
-        await core.upsert_user(c, u.id, u.username, u.full_name or "")
+        await core.upsert_user(c, u.id, u.username, u.full_name or "", dm=bool(chat and chat.type == Chat.PRIVATE))
+
+
+async def current_fee(db) -> int:
+    async with db.tx() as c:
+        return int((await core.settings(c))["fee_micro"])
 
 
 async def is_banned(db, tg_id: int) -> bool:
@@ -129,7 +136,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     done = await db.fetchval("SELECT tutorial_done FROM users WHERE tg_id=$1", uid)
     if not done:
-        await send(context, uid, T.tutorial(0, core.DEFAULTS["fee_micro"], cfg.support), tut_kb(0))
+        await send(context, uid, T.tutorial(0, await current_fee(db), cfg.support), tut_kb(0))
     else:
         await show_main(context, uid)
     await remind_addresses(context, uid)
@@ -177,18 +184,18 @@ async def on_tutorial(update: Update, context: ContextTypes.DEFAULT_TYPE, arg: s
 
 async def edit(q, text: str, rows=None):
     try:
-        if q.message and q.message.photo:
+        if q.message and getattr(q.message, "photo", None):
             await q.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup(rows), disable_web_page_preview=True)
         else:
             await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup(rows), disable_web_page_preview=True)
     except BadRequest as e:
         if "not modified" not in str(e).lower():
-            await q.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup(rows), disable_web_page_preview=True)
+            await send(q.get_bot(), q.from_user.id, text, rows, direct=True)
 
 
 async def drop_buttons(q, note: str | None = None):
     try:
-        if note and q.message and q.message.text_html:
+        if note and q.message and getattr(q.message, "text_html", None):
             await q.edit_message_text(q.message.text_html + f"\n\n<i>{T.esc(note)}</i>", parse_mode=ParseMode.HTML,
                                       disable_web_page_preview=True)
         else:
@@ -276,7 +283,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, arg: str):
         return
     if arg == "tut":
         await q.answer()
-        await send(context, uid, T.tutorial(0, core.DEFAULTS["fee_micro"], cfg.support), tut_kb(0))
+        await send(context, uid, T.tutorial(0, await current_fee(db), cfg.support), tut_kb(0))
         return
     if arg == "new":
         if await is_banned(db, uid):
@@ -304,8 +311,15 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, arg: str):
             lines.append(T.deal_line(d["code"], T.STATE_LABEL.get(d["state"], d["state"]), other, total))
     title = {"active": "진행 중인 거래", "done": "끝난 거래", "refund": "환불 대기"}[kind]
     empty = {"active": "진행 중인 거래가 없어요.", "done": "끝난 거래가 없어요.", "refund": "환불 대기 중인 거래가 없어요."}[kind]
+    btns = []
+    if kind == "active":
+        for d in rows[:8]:
+            row = [(f"{d['code']} 지금 단계 보기", f"d:scr:{d['id']}")]
+            if d["room_id"]:
+                row.append((f"{d['code']} 방 링크", f"d:link:{d['id']}"))
+            btns.append(row)
     await q.answer()
-    await send(context, uid, f"<b>{title}</b>\n\n" + ("\n".join(lines) if lines else empty), [[("메뉴로", "menu:home")]])
+    await send(context, uid, f"<b>{title}</b>\n\n" + ("\n".join(lines) if lines else empty), btns + [[("메뉴로", "menu:home")]])
 
 
 # ── 거래 버튼 ─────────────────────────────────────────
@@ -330,6 +344,7 @@ async def on_deal(update: Update, context: ContextTypes.DEFAULT_TYPE, parts: lis
     answer: str | None = None
     drop: tuple[bool, str | None] = (False, None)
     dms: list[tuple[str, list | None]] = []
+    relink: tuple[int, str] | None = None
     try:
         async with db.tx() as c:
             if act in ("acc", "dec"):
@@ -374,7 +389,7 @@ async def on_deal(update: Update, context: ContextTypes.DEFAULT_TYPE, parts: lis
                 total = sum((await core.balances(c, deal_id)).values())
                 await core.set_input(c, uid, "custom", deal_id, None, 10)
                 answer = "1:1 로 금액을 물어볼게요."
-                dms.append((T.ask_custom(d["code"], await core.label(c, d["creator"]), total), None))
+                dms.append((T.ask_custom(d["code"], await core.label(c, core._other(d, uid)), total), None))
             elif act == "sp":
                 await core.propose_split(c, ctx, deal_id, uid, how)
             elif act in ("spok", "spno"):
@@ -393,11 +408,52 @@ async def on_deal(update: Update, context: ContextTypes.DEFAULT_TYPE, parts: lis
             elif act == "inx":
                 await c.execute("DELETE FROM inputs WHERE tg_id=$1 AND kind <> 'address'", uid)
                 drop = (True, "그만뒀어요.")
+            elif act == "amt":                  # U3: 맡길 금액 다시 입력
+                d = await c.fetchrow("SELECT * FROM deals WHERE id=$1", deal_id)
+                if not d:
+                    raise core.Refused(T.NOTHING)
+                core._party(d, uid)
+                core._expect(d, "DEPOSIT")
+                if await c.fetchval("SELECT 1 FROM deposit_slots WHERE deal_id=$1 AND tg_id=$2 AND status IN ('received','confirmed')",
+                                    deal_id, uid):
+                    raise core.Refused("이미 입금이 들어와서 금액을 바꿀 수 없어요.")
+                st = await core.settings(c)
+                await core.set_input(c, uid, "amount", deal_id, None, 60)
+                answer = "새 금액을 보내주세요."
+                dms.append((T.ask_amount(d["code"], int(st["min_micro"])) + "\n\n앞서 안내한 금액은 더 이상 쓰지 마세요.", None))
+            elif act == "scr":                  # 지금 단계 화면 다시 (버튼 포함)
+                d = await c.fetchrow("SELECT * FROM deals WHERE id=$1", deal_id)
+                if not d:
+                    raise core.Refused(T.NOTHING)
+                core._party(d, uid)
+                sc = await core.screen(c, ctx, d)
+                if not sc:
+                    raise core.Refused(f"지금은 {T.STATE_LABEL.get(d['state'], d['state'])} 단계라 누를 버튼이 없어요.")
+                dms.append(sc)
+            elif act == "link":                 # U2: 거래방 링크 다시
+                d = await c.fetchrow("SELECT * FROM deals WHERE id=$1", deal_id)
+                if not d:
+                    raise core.Refused(T.NOTHING)
+                core._party(d, uid)
+                if not d["room_id"] or d["state"] in core.CLOSED:
+                    raise core.Refused("이 거래는 거래방이 없어요. 봇 1:1 에서 진행돼요.")
+                relink = (d["room_id"], d["code"])
             else:
                 answer = T.STALE
     except core.Refused as e:
         await _safe(q.answer(str(e)[:190], show_alert=True))
         return
+    if relink:
+        try:
+            link = await context.bot.create_chat_invite_link(relink[0], name=relink[1], creates_join_request=True,
+                                                             expire_date=datetime.now(timezone.utc) + timedelta(hours=2))
+            dms.append((T.room_relink(relink[1], link.invite_link), None))
+            answer = "1:1 로 링크를 보냈어요."
+        except TelegramError as e:
+            log.warning("방 링크 다시 만들기 실패: %r", e)
+            async with db.tx() as c:
+                await core.room_broken(c, ctx, relink[0], f"링크 다시 만들기 실패: {e}")
+            answer = "거래방에 문제가 있어서 1:1 로 이어갈게요."
     await _safe(q.answer(answer))
     if drop[0]:
         await drop_buttons(q, drop[1])
@@ -455,18 +511,33 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ── 1:1 글자 입력 ─────────────────────────────────────
 async def on_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """같은 사람의 입력은 하나씩 (빠르게 두 번 보내도 주소 확인 등이 꼬이지 않게)."""
+    uid = update.effective_user.id
+    locks = context.application.bot_data.setdefault("input_locks", {})
+    lock = locks.setdefault(uid, asyncio.Lock())
+    async with lock:
+        await _private_text(update, context)
+    if not lock.locked() and len(locks) > 5000:
+        locks.clear()
+
+
+async def _private_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db, ctx, cfg = svc(context)
     msg = update.effective_message
     uid = update.effective_user.id
     text = (msg.text or "").strip()
+    if await is_banned(db, uid):
+        await db.execute("DELETE FROM inputs WHERE tg_id=$1", uid)
+        await send(context, uid, T.BANNED.format(support=T.esc(cfg.support)))
+        return
     inp = await db.fetchrow("SELECT * FROM inputs WHERE tg_id=$1 AND expires_at > now()", uid)
     if not inp:
         await show_main(context, uid)
         await remind_addresses(context, uid)
         return
-    if text in ("취소", "그만", "/cancel") and inp["kind"] != "address":
+    if text in ("취소", "그만", "/cancel"):
         await db.execute("DELETE FROM inputs WHERE tg_id=$1", uid)
-        await send(context, uid, T.CANCELLED_INPUT)
+        await send(context, uid, T.ADDRESS_LATER if inp["kind"] == "address" else T.CANCELLED_INPUT)
         await show_main(context, uid)
         return
     try:
@@ -491,7 +562,12 @@ async def on_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if v is None:
                 raise core.Refused("숫자만 보내주세요.")
             async with db.tx() as c:
-                await core.propose_split(c, ctx, inp["deal_id"], uid, "custom", v)
+                d = await c.fetchrow("SELECT * FROM deals WHERE id=$1", inp["deal_id"])
+                total = sum((await core.balances(c, inp["deal_id"])).values())
+                if not 0 <= v <= total:
+                    raise core.Refused(f"0 ~ {fmt(total)} 사이로 보내주세요.")
+                # 누른 사람 본인 몫을 받음 → core 는 '신청자 몫' 으로
+                await core.propose_split(c, ctx, inp["deal_id"], uid, "custom", v if uid == d["creator"] else total - v)
                 await c.execute("DELETE FROM inputs WHERE tg_id=$1", uid)
         elif inp["kind"] == "address":
             await _input_address(context, uid, inp, text)
@@ -513,11 +589,12 @@ async def _input_partner(context, uid: int, text: str):
             raise core.Refused("이 상대와는 거래할 수 없어요.")
         d = await core.create_deal(c, ctx, uid, partner["tg_id"] if partner else None, name)
         await c.execute("DELETE FROM inputs WHERE tg_id=$1", uid)
-    if partner:
-        await send(context, uid, T.invite_sent("@" + T.esc(name), d["code"]))
-    else:
+    cancel = [[("요청 취소", f"d:cx:{d['id']}")]]
+    if partner and partner["dm_ok"]:
+        await send(context, uid, T.invite_sent("@" + T.esc(name), d["code"]), cancel)
+    else:       # 봇과 1:1 을 연 적 없는 사람에겐 봇이 먼저 못 보냄 → 링크를 직접 전해 달라고
         bot_user = context.application.bot_data.get("bot_username") or cfg.bot_username
-        await send(context, uid, T.partner_unknown(name, f"https://t.me/{bot_user}?start=join_{d['code']}"))
+        await send(context, uid, T.partner_unknown(name, f"https://t.me/{bot_user}?start=join_{d['code']}"), cancel)
 
 
 async def _input_address(context, uid: int, inp, text: str):
@@ -685,6 +762,10 @@ async def outbox_job(context: ContextTypes.DEFAULT_TYPE):
             await asyncio.sleep(min(float(getattr(e, "retry_after", 3) or 3), 10))
         except Forbidden as e:
             await db.execute("UPDATE outbox SET sent_at=now(), attempts=attempts+1, error=$2 WHERE id=$1", row["id"], f"막힘: {e}")
+            if chat < 0:
+                async with db.tx() as c:
+                    if await c.fetchval("SELECT 1 FROM rooms WHERE chat_id=$1 AND state <> 'broken'", chat):
+                        await core.room_broken(c, svc(context)[1], chat, f"방에 못 보냄: {e}")
         except (BadRequest, TelegramError) as e:
             blocked.add(chat)
             await db.execute("UPDATE outbox SET attempts=attempts+1, error=$2 WHERE id=$1", row["id"], str(e)[:300])
@@ -743,6 +824,24 @@ async def cmd_login(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                    protect_content=True)
 
 
+async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/cancel — 입력 기다리는 것 그만두기."""
+    if update.effective_chat.type != Chat.PRIVATE:
+        return
+    db, _, _ = svc(context)
+    uid = update.effective_user.id
+    kind = await db.fetchval("DELETE FROM inputs WHERE tg_id=$1 RETURNING kind", uid)
+    await send(context, uid, T.ADDRESS_LATER if kind == "address" else T.CANCELLED_INPUT)
+
+
+async def on_migrate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    m = update.effective_message
+    if m and m.migrate_to_chat_id:
+        db, _, _ = svc(context)
+        async with db.tx() as c:
+            await core.room_migrated(c, m.chat.id, m.migrate_to_chat_id)
+
+
 async def cmd_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/id — 내 텔레그램 숫자 ID (관리자 등록용)."""
     if update.effective_chat.type == Chat.PRIVATE:
@@ -789,6 +888,8 @@ def build(cfg) -> Application:
     app.add_handler(CommandHandler("admin", cmd_admin))
     app.add_handler(CommandHandler("id", cmd_id))
     app.add_handler(CommandHandler("login", cmd_login))
+    app.add_handler(CommandHandler("cancel", cmd_cancel))
+    app.add_handler(MessageHandler(filters.StatusUpdate.MIGRATE, on_migrate))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(ChatJoinRequestHandler(on_join_request))
     app.add_handler(ChatMemberHandler(on_my_member, ChatMemberHandler.MY_CHAT_MEMBER))

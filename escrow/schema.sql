@@ -209,3 +209,6 @@ CREATE TABLE IF NOT EXISTS admin_logins (
     expires_at  TIMESTAMPTZ NOT NULL,
     used_at     TIMESTAMPTZ
 );
+
+-- 2차: 봇과 1:1 을 연 적 있는 사람 (봇이 먼저 1:1 을 보낼 수 있음)
+ALTER TABLE users ADD COLUMN IF NOT EXISTS dm_ok BOOLEAN NOT NULL DEFAULT FALSE;

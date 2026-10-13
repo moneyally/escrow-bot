@@ -84,9 +84,11 @@ def invite_sent(partner: str, code: str) -> str:
     return f"{partner} 님에게 거래 요청을 보냈어요.\n거래코드: <code>{code}</code>\n\n상대가 수락하면 알려드릴게요."
 
 
-def invite(creator: str, code: str) -> str:
-    return (f"<b>거래 요청</b>\n{LINE}\n{creator} 님이 거래를 요청했어요.\n거래코드: <code>{code}</code>\n\n"
-            "아는 사람인지 꼭 확인하고 수락하세요.")
+def invite(creator: str, code: str, tg_id: int, done: int, disputes: int) -> str:
+    history = f"이 봇에서 끝낸 거래 {done}건" + (f" · 분쟁 {disputes}건" if disputes else "")
+    return (f"<b>거래 요청</b>\n{LINE}\n{creator} 님이 거래를 요청했어요.\n"
+            f"숫자 ID: <code>{tg_id}</code> · {history}\n거래코드: <code>{code}</code>\n\n"
+            "아는 사람인지 꼭 확인하고 수락하세요. 이름은 누구나 바꿀 수 있으니 숫자 ID 로 확인하세요.")
 
 
 def declined(code: str) -> str:
@@ -202,8 +204,8 @@ def split_rejected(code: str, who_: str) -> str:
     return f"{who_} 님이 정산안에 동의하지 않았어요. 다시 골라주세요. (<code>{code}</code>)"
 
 
-def ask_custom(code: str, a: str, total: int) -> str:
-    return (f"{a} 님이 받을 금액을 보내주세요. 나머지는 상대가 받아요. (<code>{code}</code>)\n"
+def ask_custom(code: str, other: str, total: int) -> str:
+    return (f"<b>본인</b>이 받을 금액을 보내주세요. 나머지는 {other} 님이 받아요. (<code>{code}</code>)\n"
             f"0 ~ {fmt(total)} 사이, 숫자만.")
 
 
@@ -304,3 +306,14 @@ ADM_KIND = {"deposit": "입금 확인", "start": "거래 시작", "partial": "�
 def address_again(code: str, reason: str) -> str:
     why = f"\n사유: {esc(reason)}" if reason.strip() else ""
     return f"<code>{code}</code> 받을 주소를 다시 받을게요. 아직 보내지 않았으니 걱정 마세요.{why}"
+
+
+def room_lost(code: str) -> str:
+    return f"거래방을 쓸 수 없게 돼서 <code>{code}</code> 거래는 여기 1:1 에서 이어갈게요. 돈과 진행 상황은 그대로예요."
+
+
+def room_relink(code: str, link: str) -> str:
+    return f"거래방 링크를 새로 만들었어요. (<code>{code}</code>)\n{esc(link)}\n2시간 동안 쓸 수 있어요."
+
+
+ADDRESS_LATER = "알겠어요. 나중에 [받을 주소 입력] 버튼이나 /start 로 다시 하시면 돼요."

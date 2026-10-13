@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import html
 import json
 import logging
 import secrets
@@ -128,11 +129,14 @@ async def say_deal(c, deal, text: str, buttons=None) -> None:
                 await say(c, p, text, buttons, deal["id"])
 
 
-async def upsert_user(c, tg_id: int, username: str | None, name: str) -> asyncpg.Record:
+async def upsert_user(c, tg_id: int, username: str | None, name: str, dm: bool = False) -> asyncpg.Record:
+    """dm=True: 봇과 1:1 에서 뭔가 한 사람 (봇이 먼저 1:1 을 보낼 수 있음)."""
+    if username:      # 아이디를 바꾼 예전 주인 줄에 남은 같은 아이디 → 엉뚱한 사람에게 요청 가지 않게
+        await c.execute("UPDATE users SET username=NULL WHERE lower(username)=lower($2) AND tg_id<>$1", tg_id, username)
     return await c.fetchrow(
-        "INSERT INTO users(tg_id, username, name) VALUES($1,$2,$3) ON CONFLICT (tg_id) DO UPDATE "
-        "SET username=EXCLUDED.username, name=EXCLUDED.name, updated_at=now() RETURNING *",
-        tg_id, username, name[:64])
+        "INSERT INTO users(tg_id, username, name, dm_ok) VALUES($1,$2,$3,$4) ON CONFLICT (tg_id) DO UPDATE "
+        "SET username=EXCLUDED.username, name=EXCLUDED.name, dm_ok=users.dm_ok OR EXCLUDED.dm_ok, updated_at=now() RETURNING *",
+        tg_id, username, name[:64], dm)
 
 
 async def user(c, tg_id: int):
@@ -217,6 +221,7 @@ def kb_complete_confirm(deal_id):
 
 
 def kb_split(deal_id, a_label: str, b_label: str):
+    a_label, b_label = html.unescape(a_label), html.unescape(b_label)     # label() 은 HTML 용 (& → &amp;) — 버튼엔 원래 글자
     return [[["각자 맡긴 만큼 돌려받기", f"d:sp:each:{deal_id}"]],
             [[f"전액 {a_label} 에게"[:40], f"d:sp:a:{deal_id}"]],
             [[f"전액 {b_label} 에게"[:40], f"d:sp:b:{deal_id}"]],
@@ -258,8 +263,18 @@ async def create_deal(c, ctx: Ctx, creator: int, partner: int | None, partner_hi
     return deal
 
 
+async def track_record(c, tg_id: int) -> tuple[int, int]:
+    """이 봇에서 끝낸 거래 수, 분쟁이 열렸던 거래 수."""
+    done = await c.fetchval("SELECT count(*) FROM deals WHERE (creator=$1 OR partner=$1) AND state='DONE'", tg_id)
+    disputes = await c.fetchval("SELECT count(DISTINCT e.deal_id) FROM events e JOIN deals d ON d.id=e.deal_id "
+                                "WHERE (d.creator=$1 OR d.partner=$1) AND e.kind='state' AND e.data->>'to'='DISPUTE'", tg_id)
+    return int(done), int(disputes)
+
+
 async def _send_invite(c, deal):
-    await say(c, deal["partner"], T.invite(await label(c, deal["creator"]), deal["code"]), kb_invite(deal["id"]), deal["id"])
+    done, disputes = await track_record(c, deal["creator"])
+    await say(c, deal["partner"], T.invite(await label(c, deal["creator"]), deal["code"], deal["creator"], done, disputes),
+              kb_invite(deal["id"]), deal["id"])
 
 
 async def claim_invite(c, ctx: Ctx, code: str, tg_id: int):
@@ -442,7 +457,8 @@ async def open_slot(c, ctx: Ctx, deal_id: int, tg_id: int, base: int):
     if not d["deadline"] or d["deadline"] < deadline:
         await c.execute("UPDATE deals SET deadline=$2 WHERE id=$1", deal_id, deadline)
     await event(c, deal_id, tg_id, "slot", {"amount": amount})
-    await say(c, tg_id, T.deposit_guide(d["code"], ctx.cfg.pay_address, amount, int(st["slot_minutes"])), deal_id=deal_id)
+    await say(c, tg_id, T.deposit_guide(d["code"], ctx.cfg.pay_address, amount, int(st["slot_minutes"])),
+              [[["금액 다시 입력", f"d:amt:{deal_id}"]]], deal_id=deal_id)
     return slot
 
 
@@ -1235,8 +1251,59 @@ async def room_freed(c, chat_id: int):
 
 
 async def room_broken(c, ctx: Ctx, chat_id: int, note: str):
+    """방을 못 쓰게 됨(봇이 쫓겨남·권한 빠짐 등) → 고장 표시 + 그 방에서 진행 중이던 거래는 두 사람 1:1 로 이어감."""
+    for r in await c.fetch("SELECT id FROM deals WHERE room_id=$1 AND state <> ALL($2)", chat_id, list(CLOSED)):
+        await _to_dm(c, ctx, r["id"])
     await c.execute("UPDATE rooms SET state='broken', note=$2, updated_at=now() WHERE chat_id=$1", chat_id, note[:200])
     await say_admins(c, ctx, f"⚠️ 거래방 문제: {chat_id}\n{T.esc(note)}")
+
+
+async def _to_dm(c, ctx: Ctx, deal_id: int):
+    d = await _lock(c, deal_id)
+    if d["state"] in CLOSED or not d["room_id"]:
+        return
+    d = await c.fetchrow("UPDATE deals SET room_id=NULL, updated_at=now() WHERE id=$1 RETURNING *", deal_id)
+    await event(c, deal_id, 0, "room_lost", {})
+    for p in (d["creator"], d["partner"]):
+        if p:
+            await say(c, p, T.room_lost(d["code"]), deal_id=deal_id)
+    if d["state"] == "ROOM":
+        await _enter_notice(c, ctx, d, 0)
+        return
+    sc = await screen(c, ctx, d)
+    if sc:
+        await say_deal(c, d, *sc)
+
+
+async def screen(c, ctx: Ctx, d):
+    """지금 단계의 화면(글, 버튼) — 방을 잃었거나 '지금 단계 다시 보기'. 돌려줄 게 없으면 None."""
+    st = await settings(c)
+    code, s = d["code"], d["state"]
+    if s == "NOTICE":
+        return (T.notice(code, await label(c, d["creator"]), await label(c, d["partner"]), d["fee_micro"], int(st["min_micro"]),
+                         ctx.cfg.support), kb_notice(d["id"]))
+    if s == "CHOOSE":
+        rows = await c.fetch("SELECT tg_id, choice FROM deal_parties WHERE deal_id=$1 ORDER BY role", d["id"])
+        return T.choose(code, [(await label(c, r["tg_id"]), r["choice"]) for r in rows]), kb_choose(d["id"])
+    if s == "FUNDED":
+        bal = await balances(c, d["id"])
+        return T.funded(code, [(await label(c, p), v) for p, v in bal.items()], sum(bal.values())), kb_funded(d["id"])
+    if s == "SPLIT":
+        bal = await balances(c, d["id"])
+        return (T.split_ask(code, [(await label(c, p), v) for p, v in bal.items()], sum(bal.values()), d["fee_micro"]),
+                kb_split(d["id"], await label(c, d["creator"]), await label(c, d["partner"])))
+    return None
+
+
+async def room_migrated(c, old: int, new: int):
+    """일반 그룹이 슈퍼그룹으로 바뀌면 chat_id 가 바뀜 → 방·거래를 새 id 로."""
+    if not await c.fetchval("SELECT 1 FROM rooms WHERE chat_id=$1", old) or await c.fetchval("SELECT 1 FROM rooms WHERE chat_id=$1", new):
+        return
+    await c.execute("INSERT INTO rooms(chat_id, title, state, note, deal_id, invite_link) SELECT $2, title, state, note, deal_id, invite_link "
+                    "FROM rooms WHERE chat_id=$1", old, new)
+    await c.execute("UPDATE deals SET room_id=$2 WHERE room_id=$1", old, new)
+    await c.execute("DELETE FROM rooms WHERE chat_id=$1", old)
+    await event(c, None, 0, "room_migrate", {"old": old, "new": new})
 
 
 # ── 조회 (메뉴·관리 페이지) ───────────────────────────
