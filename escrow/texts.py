@@ -105,14 +105,15 @@ def no_room(code: str) -> str:
             "상대에게도 같은 메시지가 갑니다.")
 
 
-def notice(code: str, a: str, b: str, fee: int, minimum: int, support: str) -> str:
+def notice(code: str, a: str, b: str, fee: int, minimum: int, support: str, bot_username: str = "") -> str:
+    official = f"· 공식 봇은 @{esc(bot_username)} 하나뿐이에요. 이름이 비슷한 봇·계정은 사칭입니다.\n" if bot_username else ""
     return (f"<b>공지</b>\n{LINE}\n거래코드: <code>{code}</code>\n{a} · {b}\n{LINE}\n\n"
             f"· 수수료는 거래당 {fmt(fee)} USDT, 받는 금액에서 빠져요.\n"
             f"· 예치할 땐 한 사람당 최소 {fmt(minimum)} USDT.\n"
             "· 입금 주소와 정확한 금액은 봇 1:1 로만 보냅니다. 여기 올라온 주소로는 보내지 마세요.\n"
             "· 물건이나 작업을 확인한 뒤에만 [거래완료].\n"
             "· 단계마다 30분 안에 응답이 없으면 자동으로 취소돼요. 예치금이 있으면 환불 대기로 넘어갑니다.\n"
-            "· 관리자는 먼저 DM 하지 않아요.\n\n"
+            "· 관리자는 먼저 DM 하지 않아요.\n" + official + "\n"
             f"두 분 다 [공지 확인]을 눌러야 다음으로 넘어갑니다.\n문의: {esc(support)}")
 
 
@@ -317,3 +318,18 @@ def room_relink(code: str, link: str) -> str:
 
 
 ADDRESS_LATER = "알겠어요. 나중에 [받을 주소 입력] 버튼이나 /start 로 다시 하시면 돼요."
+
+
+def receipt(code: str, deposited: int, received: int, fee: int, txs: list[str]) -> str:
+    links = "\n".join(f"https://tronscan.org/#/transaction/{esc(t)}" for t in txs)
+    return (f"<b>거래 영수증</b>\n{LINE}\n거래코드: <code>{code}</code>\n"
+            f"내 예치금: {fmt(deposited)} USDT\n받은 돈: {fmt(received)} USDT\n낸 수수료: {fmt(fee)} USDT\n{LINE}"
+            + (f"\n송금 기록\n{links}" if links else ""))
+
+
+def check_result(code: str, state: str, parties: str | None) -> str:
+    who = f"\n당사자: {parties}" if parties else "\n(당사자에게만 누구끼리인지 보여드려요)"
+    return f"✅ <code>{code}</code> 는 이 봇에서 만든 진짜 거래예요.\n상태: {state}{who}"
+
+
+CHECK_NONE = "❌ 그런 거래코드는 이 봇에 없어요. 다른 봇이나 계정이 보낸 거라면 사칭일 수 있어요. 돈을 보내지 마세요."

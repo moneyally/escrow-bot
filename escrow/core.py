@@ -352,7 +352,7 @@ async def _enter_notice(c, ctx: Ctx, d, actor):
     st = await settings(c)
     d = await _set_state(c, d, "NOTICE", actor, int(st["stage_minutes"]))
     await say_deal(c, d, T.notice(d["code"], await label(c, d["creator"]), await label(c, d["partner"]),
-                                  d["fee_micro"], int(st["min_micro"]), ctx.cfg.support), kb_notice(d["id"]))
+                                  d["fee_micro"], int(st["min_micro"]), ctx.cfg.support, ctx.cfg.bot_username), kb_notice(d["id"]))
     return d
 
 
@@ -972,6 +972,7 @@ async def _maybe_closed(c, ctx: Ctx, d, actor: int):
     if d["state"] in ("PAYOUT", "ADDRESS") and settled:
         d = await _set_state(c, d, "DONE", actor, close_reason="done")
         await say_deal(c, d, T.deal_done(d["code"]))
+        await _receipts(c, d)
         await _close_room(c, d)
     elif d["state"] in ("PAYOUT", "ADDRESS"):
         d = await _set_state(c, d, "CANCELLED", actor, close_reason="no_money")
@@ -984,6 +985,30 @@ async def _maybe_closed(c, ctx: Ctx, d, actor: int):
         d = await _set_state(c, d, "CANCELLED", actor, close_reason=d["close_reason"] or "refunded")
         await say_deal(c, d, T.cancel_done(d["code"], "예치금은 다 돌려드렸어요."))
         await _close_room(c, d)
+
+
+async def _receipts(c, d):
+    """거래가 끝나면 두 사람 1:1 에 영수증 한 장 (예치금·받은 돈·수수료·송금 tx)."""
+    for p in (d["creator"], d["partner"]):
+        if not p:
+            continue
+        dep = await c.fetchval("SELECT coalesce(sum(amount_micro),0) FROM deposit_slots WHERE deal_id=$1 AND tg_id=$2 AND status='confirmed'",
+                               d["id"], p)
+        rows = await c.fetch("SELECT amount_micro, fee_micro, tx_id FROM payouts WHERE deal_id=$1 AND tg_id=$2 AND status='confirmed'",
+                             d["id"], p)
+        await say(c, p, T.receipt(d["code"], int(dep), sum(r["amount_micro"] for r in rows), sum(r["fee_micro"] for r in rows),
+                                  [r["tx_id"] for r in rows if r["tx_id"]]), deal_id=d["id"])
+
+
+async def check_deal(c, code: str, tg_id: int) -> str:
+    """/check 거래코드 — 이 봇의 진짜 거래인지 (가짜 봇·사칭 대응). 누구끼리인지는 당사자에게만."""
+    d = await c.fetchrow("SELECT * FROM deals WHERE code=$1", code.strip().upper().lstrip("#"))
+    if not d:
+        return T.CHECK_NONE
+    parties = None
+    if tg_id in (d["creator"], d["partner"]):
+        parties = f"{await label(c, d['creator'])} · {await label(c, d['partner'])}"
+    return T.check_result(d["code"], T.STATE_LABEL.get(d["state"], d["state"]), parties)
 
 
 async def _close_room(c, d):
@@ -1284,7 +1309,7 @@ async def screen(c, ctx: Ctx, d):
     code, s = d["code"], d["state"]
     if s == "NOTICE":
         return (T.notice(code, await label(c, d["creator"]), await label(c, d["partner"]), d["fee_micro"], int(st["min_micro"]),
-                         ctx.cfg.support), kb_notice(d["id"]))
+                         ctx.cfg.support, ctx.cfg.bot_username), kb_notice(d["id"]))
     if s == "CHOOSE":
         rows = await c.fetch("SELECT tg_id, choice FROM deal_parties WHERE deal_id=$1 ORDER BY role", d["id"])
         return T.choose(code, [(await label(c, r["tg_id"]), r["choice"]) for r in rows]), kb_choose(d["id"])

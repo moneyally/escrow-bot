@@ -850,6 +850,18 @@ async def cmd_login(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                    protect_content=True)
 
 
+async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/check 거래코드 — 이 봇에서 만든 진짜 거래인지."""
+    db, _, _ = svc(context)
+    uid = update.effective_user.id
+    if not context.args:
+        await update.effective_message.reply_text("거래코드를 같이 보내주세요. 예: /check AB12CD")
+        return
+    async with db.tx() as c:
+        text = await core.check_deal(c, context.args[0][:12], uid)
+    await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/cancel — 입력 기다리는 것 그만두기."""
     if update.effective_chat.type != Chat.PRIVATE:
@@ -916,6 +928,7 @@ def build(cfg) -> Application:
     app.add_handler(CommandHandler("id", cmd_id))
     app.add_handler(CommandHandler("login", cmd_login))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
+    app.add_handler(CommandHandler("check", cmd_check))
     app.add_handler(MessageHandler(filters.StatusUpdate.MIGRATE, on_migrate))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(ChatJoinRequestHandler(on_join_request))

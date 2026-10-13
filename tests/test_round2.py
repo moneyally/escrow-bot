@@ -276,3 +276,19 @@ async def test_o11_settings_are_strict(users):
     async with db.tx() as c:
         await core.set_setting(c, "new_deals", False, ADMIN)
         assert (await core.settings(c))["new_deals"] is False
+
+
+async def test_d7_check_and_d9_receipt(users, ctx):
+    db = users
+    d, _ = await to_funded(db, ctx, 1000 * U, 0)
+    async with db.tx() as c:
+        assert "진짜 거래" in await core.check_deal(c, d["code"].lower(), A)
+        assert "@alice" in await core.check_deal(c, d["code"], A)
+        assert "@alice" not in await core.check_deal(c, d["code"], 999)
+        assert "없어요" in await core.check_deal(c, "ZZZZZZ", A)
+    await finish_split(db, ctx, d, "b")
+    await give_addresses(db, ctx, d)
+    await _approve_all(db, ctx, "final")
+    await _send_all(db, ctx, d["id"])
+    rec = [r["text"] for r in await db.fetch("SELECT text FROM outbox WHERE chat_id=$1 AND text LIKE '%영수증%'", B)]
+    assert rec and "받은 돈" in rec[0] and "tronscan" in rec[0]
