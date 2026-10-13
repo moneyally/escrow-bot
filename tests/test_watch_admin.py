@@ -216,3 +216,19 @@ async def test_todo_lists_stuck_deals_and_watch_state(users, ctx):
         j = (await c.get("/api/todo")).json()
     assert [s["code"] for s in j["stuck"]] == [d["code"]] and j["watch_age"] is None
     assert {h["mode"] for h in j["hints"]} == set(core.MODES)
+
+
+async def test_diag_window_is_token_only_and_redacts(users):
+    from escrow.admin import diag
+    db = users
+    async with await client(db, logged_in=False) as c:
+        assert (await c.get("/diag/v1/health")).status_code == 401
+        tok, rec = diag.new_token()
+        await db.execute("INSERT INTO kv(key, value) VALUES('diag_token',$1)", rec)
+        assert (await c.get("/diag/v1/health", headers={"Authorization": "Bearer wrong"})).status_code == 401
+        await db.execute("INSERT INTO kv(key, value) VALUES('helper',$1)", {"session": "SECRET", "api_hash": "a" * 32, "user_id": 1, "name": "h"})
+        r = await c.get("/diag/v1/health", headers={"Authorization": f"Bearer {tok}"})
+        assert r.status_code == 200 and "SECRET" not in r.text and "a" * 32 not in r.text
+        assert r.json()["helper"]["connected"] is True
+        assert (await c.get("/diag/v1/nope", headers={"Authorization": f"Bearer {tok}"})).status_code == 404
+    assert diag.redact("tok 123456789:AAHUK3aOInpdek1ibgImHg6iZxBRIlS3gts end") == "tok [가림] end"

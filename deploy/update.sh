@@ -58,6 +58,8 @@ rsync -a --delete --exclude .env --exclude .venv --exclude backups --exclude .de
 chown -R escrow: "$APP"; chmod 600 "$APP/.env"
 cp "$APP"/deploy/escrow-*.service "$APP"/deploy/escrow-*.timer /etc/systemd/system/ 2>/dev/null || true
 systemctl daemon-reload
+# 원격 점검 창구(관리 페이지 프로세스)가 서비스 로그를 읽을 수 있게 (읽기 전용 그룹)
+id -nG escrow | grep -qw systemd-journal || usermod -aG systemd-journal escrow
 SERVICES="escrow-admin escrow-watcher"
 grep -qE '^BOT_TOKEN=.+' "$APP/.env" && SERVICES="$SERVICES escrow-bot"
 systemctl restart $SERVICES

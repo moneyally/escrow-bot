@@ -35,7 +35,11 @@ USDT(TRC20) 거래 중개 텔레그램 봇. 설계 = `docs/DESIGN.md`, 사진 �
 - **main 에 push = 2분 안에 서버 반영** (`escrow-update.timer` → `deploy/update.sh`: import 검사 → 반영 → 안 켜지면 되돌림, 결과는 관리자 텔레그램).
   그러니 push 전에 전체 테스트 필수.
 - 저장소가 공개일 땐 HTTPS 로 받음. 비공개로 바꾸면 서버 배포 키(`/root/.ssh/escrow_deploy.pub`)를 GitHub 저장소 Deploy keys 에 등록해야 함.
-- 첫 설치용 부트 통로(/_boot)는 닫힘 (10-13). 서버 SSH 는 비밀번호 로그인 꺼짐 — 급하면 헤츠너 웹 콘솔.
+- 첫 설치용 부트 통로(/_boot)는 닫힘 (10-13, root 로 코드 올리고 설치 돌리는 통로라 열어 두면 위험). 서버 SSH 는 비밀번호 로그인 꺼짐.
+- **서버 보기 = 원격 점검 창구 (읽기 전용)**: `python tools/diag.py health|deals|deal code=…|outbox|events|rooms|chain|settings|logs unit=…|tables`
+  토큰은 환경변수 `ESCROW_DIAG_TOKEN` (오너가 봇 1:1 `/diag` 로 받아 클로드 환경 비밀값에 넣음 — 출력·커밋 금지).
+  서버를 '고치는' 건 코드 push(자동 반영)로만. 쓰기 통로는 만들지 않는다.
+- **봇 토큰으로 `getUpdates` 부르지 말 것** (운영 봇의 업데이트를 빼앗음).
 - 백업: 서버 안 매일 04:10 (14일) + 04:30 암호화본을 첫 관리자 텔레그램으로 (`escrow/backup.py`, 비밀번호 BACKUP_PASS).
 
 ## 테스트

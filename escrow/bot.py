@@ -971,6 +971,22 @@ async def on_migrate(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await core.room_migrated(c, m.chat.id, m.migrate_to_chat_id)
 
 
+async def cmd_diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/diag — 원격 점검 창구 토큰 새로 받기 (관리자만, 이전 토큰은 바로 무효). 클로드 환경 비밀값 ESCROW_DIAG_TOKEN 에 넣는 용."""
+    db, ctx, _ = svc(context)
+    uid = update.effective_user.id
+    if update.effective_chat.type != Chat.PRIVATE or uid not in ctx.admins:
+        return
+    from .admin.diag import new_token
+    tok, rec = new_token()
+    async with db.tx() as c:
+        await c.execute("INSERT INTO kv(key, value) VALUES('diag_token',$1) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value", rec)
+        await core.event(c, None, uid, "diag_token", {})
+    await context.bot.send_message(uid, "🔌 원격 점검 토큰 (읽기 전용, 이전 토큰은 이제 안 돼요)\n\n"
+                                        f"<code>{tok}</code>\n\n클로드 환경 설정의 비밀값 ESCROW_DIAG_TOKEN 에 넣어 주세요. "
+                                        "채팅에는 붙이지 마세요.", parse_mode=ParseMode.HTML, protect_content=True)
+
+
 async def cmd_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/id — 내 텔레그램 숫자 ID (관리자 등록용)."""
     if update.effective_chat.type == Chat.PRIVATE:
@@ -1022,6 +1038,7 @@ def build(cfg) -> Application:
     app.add_handler(CommandHandler("login", cmd_login))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(CommandHandler("check", cmd_check))
+    app.add_handler(CommandHandler("diag", cmd_diag))
     app.add_handler(MessageHandler(filters.StatusUpdate.MIGRATE, on_migrate))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(ChatJoinRequestHandler(on_join_request))

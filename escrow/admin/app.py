@@ -20,6 +20,7 @@ from pydantic import BaseModel
 
 from .. import config as cfgmod
 from .. import core, helper
+from . import diag
 from ..db import DB
 from ..money import fmt, fmt_exact, parse_usdt
 
@@ -519,6 +520,7 @@ def create_app(cfg=None, database: DB | None = None) -> FastAPI:
         return [{"id": r["id"], "deal_id": r["deal_id"], "actor": r["actor"], "kind": r["kind"], "data": r["data"],
                  "at": r["at"].isoformat()} for r in rows]
 
+    app.include_router(diag.router(db))        # 🔌 읽기 전용 원격 점검 (토큰은 봇 /diag)
     if (WEB / "assets").is_dir():   # 파일 이름에 해시가 붙어 있어 오래 캐시해도 됨
         app.mount("/assets", StaticFiles(directory=WEB / "assets"), name="assets")
     return app
