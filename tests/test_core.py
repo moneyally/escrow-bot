@@ -341,7 +341,7 @@ async def test_payout_never_exceeds_deposit(users, ctx):
     db = users
     d, slots = await to_funded(db, ctx, 100 * U, 0)
     async with db.tx() as c:
-        with pytest.raises(core.Refused, match="맡긴 돈보다"):
+        with pytest.raises(core.Refused, match="예치금보다"):
             await core._make_payouts(c, ctx, d, None, {A: 101 * U}, "final", 0)
 
 

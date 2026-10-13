@@ -248,7 +248,7 @@ async def on_mock(update: Update, context: ContextTypes.DEFAULT_TYPE, arg: str):
         await out(mock.ask_amount())
     elif arg == "nodep":
         st["mine"] = 0
-        await out((f"(연습) 안 맡기기를 골랐어요. {mock.PARTNER} 님 입금을 기다려요.", None))
+        await out((f"(연습) 예치 안 함을 골랐어요. {mock.PARTNER} 님 입금을 기다려요.", None))
         await out(mock.checking(), 1)
         await out(mock.funded(0, st["theirs"]), 2)
     elif arg.startswith("amt:"):
@@ -408,7 +408,7 @@ async def on_deal(update: Update, context: ContextTypes.DEFAULT_TYPE, parts: lis
             elif act == "inx":
                 await c.execute("DELETE FROM inputs WHERE tg_id=$1 AND kind <> 'address'", uid)
                 drop = (True, "그만뒀어요.")
-            elif act == "amt":                  # U3: 맡길 금액 다시 입력
+            elif act == "amt":                  # U3: 예치 금액 다시 입력
                 d = await c.fetchrow("SELECT * FROM deals WHERE id=$1", deal_id)
                 if not d:
                     raise core.Refused(T.NOTHING)

@@ -31,7 +31,7 @@ export function Dashboard({ stats: s, nav, tick }: { stats: Stats | null; nav: N
             : <div key={label} className="tile">{body}</div>;
         })}
       </div>
-      <Group title="지갑" footer="장부 = 맡긴 돈 − 보낸 돈 (번 수수료 포함). 지갑 잔액은 한 시간마다 조회해요.">
+      <Group title="지갑" footer="장부 = 예치금 − 보낸 돈 (번 수수료 포함). 지갑 잔액은 한 시간마다 조회해요.">
         <Row label="장부상 있어야 할 돈"><span className="num">{s.ledger} USDT</span></Row>
         <Row label="실제 지갑 잔액">
           <span className="num">{s.wallet != null ? `${s.wallet} USDT` : "아직 조회 전"}</span>

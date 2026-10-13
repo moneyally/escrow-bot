@@ -25,17 +25,17 @@ def who(username: str | None, name: str = "", tg_id: int | None = None) -> str:
 # ── 튜토리얼 ─────────────────────────────────────────
 TUTORIAL = [
     ("에스크로가 뭐냐면 (1/3)",
-     "돈을 중간에서 잠깐 맡아두는 거예요.\n\n"
+     "돈을 중간에서 잠깐 예치해두는 거예요.\n\n"
      "모르는 사람이랑 거래하면 늘 이렇게 되죠.\n"
      "A: 돈 먼저 보내세요\nB: 아니 물건 먼저요\n\n"
      "여기선 그럴 필요 없어요.\n"
-     "1. 정한 금액을 저희한테 맡기고\n"
+     "1. 정한 금액을 저희한테 예치하고\n"
      "2. 물건이나 작업을 주고받고\n"
      "3. 둘 다 완료 누르면\n"
      "4. 합의한 대로 저희가 보내드립니다."),
     ("진행 순서 (2/3)",
      "<b>1. 신청</b>\n[거래 신청] → 상대 아이디 입력 → 상대가 수락하면 둘만 들어가는 거래방이 열려요.\n\n"
-     "<b>2. 공지 확인 → 예치</b>\n공지를 둘 다 확인하고, 각자 맡길지 말지 고릅니다.\n\n"
+     "<b>2. 공지 확인 → 예치</b>\n공지를 둘 다 확인하고, 각자 예치할지 말지 고릅니다.\n\n"
      "<b>3. 입금</b>\n입금 주소랑 정확한 금액은 봇 1:1 로만 가요. USDT(TRC20)만 됩니다.\n\n"
      "<b>4. 완료 → 정산</b>\n둘 다 [거래완료] → 나눌 방법 정하고 상대가 동의 → 받을 주소 입력 → 송금.\n\n"
      "수수료는 거래당 {fee} USDT, 받는 금액에서 빠집니다."),
@@ -60,7 +60,7 @@ TUTORIAL_END = "다 봤어요. 연습 거래 한번 해볼래요? 실제 돈은 
 # ── 메인 ─────────────────────────────────────────────
 def main_menu(bot_name: str, support: str) -> str:
     return (f"<b>{esc(bot_name)}</b>\n{LINE}\n"
-            "USDT(TRC20) 거래를 중간에서 맡아드려요.\n\n"
+            "USDT(TRC20) 거래 대금을 중간에서 예치받아 드려요.\n\n"
             "1. [거래 신청] 누르고\n2. 상대 아이디 입력하고\n3. 거래방에서 진행하면 끝\n\n"
             f"문의: {esc(support)}")
 
@@ -108,16 +108,16 @@ def no_room(code: str) -> str:
 def notice(code: str, a: str, b: str, fee: int, minimum: int, support: str) -> str:
     return (f"<b>공지</b>\n{LINE}\n거래코드: <code>{code}</code>\n{a} · {b}\n{LINE}\n\n"
             f"· 수수료는 거래당 {fmt(fee)} USDT, 받는 금액에서 빠져요.\n"
-            f"· 맡길 땐 한 사람당 최소 {fmt(minimum)} USDT.\n"
+            f"· 예치할 땐 한 사람당 최소 {fmt(minimum)} USDT.\n"
             "· 입금 주소와 정확한 금액은 봇 1:1 로만 보냅니다. 여기 올라온 주소로는 보내지 마세요.\n"
             "· 물건이나 작업을 확인한 뒤에만 [거래완료].\n"
-            "· 단계마다 30분 안에 응답이 없으면 자동으로 취소돼요. 맡긴 돈이 있으면 환불 대기로 넘어갑니다.\n"
+            "· 단계마다 30분 안에 응답이 없으면 자동으로 취소돼요. 예치금이 있으면 환불 대기로 넘어갑니다.\n"
             "· 관리자는 먼저 DM 하지 않아요.\n\n"
             f"두 분 다 [공지 확인]을 눌러야 다음으로 넘어갑니다.\n문의: {esc(support)}")
 
 
 NOTICE_FULL = ("<b>이용 규칙 전문</b>\n\n"
-               "1. 맡긴 돈은 두 분이 합의한 분배안대로만 나갑니다. 한 사람 말만으론 못 움직여요.\n"
+               "1. 예치금은 두 분이 합의한 분배안대로만 나갑니다. 한 사람 말만으론 못 움직여요.\n"
                "2. 분배가 안 맞으면 [관리자 호출]. 관리자가 거래방 기록과 증빙을 보고 정합니다.\n"
                "3. 끝자리까지 정확한 금액으로 보내야 자동으로 확인돼요. 금액이 다르면 확인이 늦어집니다.\n"
                "4. TRC20 USDT 외의 코인, 다른 네트워크로 보낸 건 돌려드리기 어렵습니다.\n"
@@ -131,17 +131,17 @@ def notice_status(code: str, rows: list[tuple[str, bool]]) -> str:
 
 
 def choose(code: str, rows: list[tuple[str, str | None]]) -> str:
-    label = {"deposit": "맡김", "none": "안 맡김", None: "아직"}
+    label = {"deposit": "예치", "none": "예치 안 함", None: "아직"}
     lines = "\n".join(f"{n}: {label[c]}" for n, c in rows)
     return (f"<b>예치 선택</b>\n{LINE}\n거래코드: <code>{code}</code>\n\n"
-            "각자 돈을 맡길지 골라주세요. 최소 한 분은 맡겨야 진행돼요.\n\n" + lines)
+            "각자 예치할지 골라주세요. 최소 한 분은 예치해야 진행돼요.\n\n" + lines)
 
 
-BOTH_NONE = "두 분 다 안 맡기면 진행할 게 없어요. 한 분은 [맡기기]를 골라주세요."
+BOTH_NONE = "두 분 다 예치 안 하면 진행할 게 없어요. 한 분은 [예치하기]를 골라주세요."
 
 
 def ask_amount(code: str, minimum: int) -> str:
-    return (f"얼마 맡기실 건가요? (거래 <code>{code}</code>)\n숫자만 보내주세요. 최소 {fmt(minimum)} USDT\n예: <code>1000</code>")
+    return (f"얼마 예치하실 건가요? (거래 <code>{code}</code>)\n숫자만 보내주세요. 최소 {fmt(minimum)} USDT\n예: <code>1000</code>")
 
 
 def amount_bad(minimum: int) -> str:
@@ -241,7 +241,7 @@ def deal_done(code: str) -> str:
 
 
 def partial_ask(code: str, other: str, balance: int, room_for: int) -> str:
-    return (f"<b>부분 지급</b> (<code>{code}</code>)\n내가 맡긴 돈에서 {other} 님에게 먼저 보낼 금액을 보내주세요.\n"
+    return (f"<b>부분 지급</b> (<code>{code}</code>)\n내 예치금에서 {other} 님에게 먼저 보낼 금액을 보내주세요.\n"
             f"보낼 수 있는 최대: {fmt(room_for)} USDT (내 잔액 {fmt(balance)})\n숫자만.")
 
 
@@ -255,15 +255,15 @@ def cancel_done(code: str, reason: str = "") -> str:
 
 def cancel_asked(code: str, who_: str) -> str:
     return (f"{who_} 님이 거래 취소를 요청했어요. (<code>{code}</code>)\n"
-            "동의하면 맡긴 돈은 각자에게 돌려드립니다.")
+            "동의하면 예치금은 각자에게 돌려드립니다.")
 
 
 def refund_wait(code: str) -> str:
-    return (f"맡긴 돈을 돌려드릴게요. (<code>{code}</code>)\n받을 주소를 1:1 로 물어볼게요.")
+    return (f"예치금을 돌려드릴게요. (<code>{code}</code>)\n받을 주소를 1:1 로 물어볼게요.")
 
 
 def expired(code: str, refunded: bool) -> str:
-    tail = "\n맡긴 돈은 환불 대기로 넘어갔어요. 1:1 로 받을 주소를 물어볼게요." if refunded else ""
+    tail = "\n예치금은 환불 대기로 넘어갔어요. 1:1 로 받을 주소를 물어볼게요." if refunded else ""
     return f"30분 동안 응답이 없어서 거래를 멈췄어요. (<code>{code}</code>){tail}"
 
 

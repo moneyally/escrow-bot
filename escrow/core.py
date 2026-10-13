@@ -210,7 +210,7 @@ def kb_notice(deal_id):
 
 
 def kb_choose(deal_id):
-    return [[["맡기기", f"d:dep:{deal_id}"], ["안 맡기기", f"d:nodep:{deal_id}"]],
+    return [[["예치하기", f"d:dep:{deal_id}"], ["예치 안 함", f"d:nodep:{deal_id}"]],
             [["관리자 호출", f"d:sos:{deal_id}"], ["거래 취소", f"d:cx:{deal_id}"]]]
 
 
@@ -225,7 +225,7 @@ def kb_complete_confirm(deal_id):
 
 def kb_split(deal_id, a_label: str, b_label: str):
     a_label, b_label = html.unescape(a_label), html.unescape(b_label)     # label() 은 HTML 용 (& → &amp;) — 버튼엔 원래 글자
-    return [[["각자 맡긴 만큼 돌려받기", f"d:sp:each:{deal_id}"]],
+    return [[["각자 예치한 만큼 돌려받기", f"d:sp:each:{deal_id}"]],
             [[f"전액 {a_label} 에게"[:40], f"d:sp:a:{deal_id}"]],
             [[f"전액 {b_label} 에게"[:40], f"d:sp:b:{deal_id}"]],
             [["직접 입력", f"d:sp:custom:{deal_id}"]],
@@ -418,7 +418,7 @@ def _offsets() -> list[int]:
 
 
 async def open_slot(c, ctx: Ctx, deal_id: int, tg_id: int, base: int):
-    """맡길 금액을 받아 끝자리 금액 자리를 만든다 → (slot). 끝자리 0.0001~0.0999 중 최근 24시간 안 쓴 것을 무작위 순서로."""
+    """예치 금액을 받아 끝자리 금액 자리를 만든다 → (slot). 끝자리 0.0001~0.0999 중 최근 24시간 안 쓴 것을 무작위 순서로."""
     if not ctx.cfg.can_take_deposits:
         raise Refused(T.DEPOSITS_OFF)
     d = await _lock(c, deal_id)
@@ -572,7 +572,7 @@ async def held(c, deal_id: int, statuses=("confirmed",)) -> int:
 
 
 async def balances(c, deal_id: int, statuses=("confirmed",)) -> dict[int, int]:
-    """사람별 남은 몫 = 맡긴 돈 − 그 사람 몫에서 나간 지급(취소 안 된 모든 지급의 debits). 두 당사자 모두 키로 (0 이어도)."""
+    """사람별 남은 몫 = 예치금 − 그 사람 몫에서 나간 지급(취소 안 된 모든 지급의 debits). 두 당사자 모두 키로 (0 이어도)."""
     parties = [r["tg_id"] for r in await c.fetch("SELECT tg_id FROM deal_parties WHERE deal_id=$1 ORDER BY role", deal_id)]
     out = {p: 0 for p in parties}
     for r in await c.fetch("SELECT tg_id, sum(amount_micro) s FROM deposit_slots WHERE deal_id=$1 AND status = ANY($2) GROUP BY tg_id",
@@ -743,7 +743,7 @@ async def answer_split(c, ctx: Ctx, deal_id: int, split_id: int, tg_id: int, agr
 
 
 async def _make_payouts(c, ctx: Ctx, d, split_id: int, plan: dict[int, int], kind: str, fee: int):
-    """분배안 → 받는 사람마다 지급 줄(need_address). 지급 합계가 맡긴 돈을 넘으면 거절 (돈 규칙)."""
+    """분배안 → 받는 사람마다 지급 줄(need_address). 지급 합계가 예치금을 넘으면 거절 (돈 규칙)."""
     statuses = ("received", "confirmed") if kind == "refund" else ("confirmed",)
     avail = {p: max(0, v) for p, v in (await balances(c, d["id"], statuses)).items()}
     debits: dict[int, dict[str, int]] = {}
@@ -758,7 +758,7 @@ async def _make_payouts(c, ctx: Ctx, d, split_id: int, plan: dict[int, int], kin
                 avail[p] -= take
                 need -= take
         if need:
-            raise Refused("맡긴 돈보다 많이 나갈 수 없어요.")
+            raise Refused("예치금보다 많이 나갈 수 없어요.")
         debits[r] = dd
     fees = split_fee(plan, fee)
     made = 0
@@ -982,7 +982,7 @@ async def _maybe_closed(c, ctx: Ctx, d, actor: int):
         await _close_room(c, d)
     else:
         d = await _set_state(c, d, "CANCELLED", actor, close_reason=d["close_reason"] or "refunded")
-        await say_deal(c, d, T.cancel_done(d["code"], "맡긴 돈은 다 돌려드렸어요."))
+        await say_deal(c, d, T.cancel_done(d["code"], "예치금은 다 돌려드렸어요."))
         await _close_room(c, d)
 
 
@@ -1071,7 +1071,7 @@ async def open_dispute(c, ctx: Ctx, deal_id: int, tg_id: int):
     await _void_approvals(c, deal_id)          # 분쟁 중엔 아무것도 승인 안 됨 (풀 때 _resume 이 다시 만듦)
     await say_deal(c, d, T.dispute_opened(d["code"], await label(c, tg_id)))
     await say_admins(c, ctx, f"🆘 <b>관리자 호출</b> · <code>{d['code']}</code>\n{await label(c, tg_id)} 님 · 이전 단계 {d['prev_state']}\n"
-                             f"맡긴 돈 {fmt(await held(c, deal_id, MONEY_HELD))} USDT", deal_id=deal_id)
+                             f"예치금 {fmt(await held(c, deal_id, MONEY_HELD))} USDT", deal_id=deal_id)
     return d
 
 
@@ -1349,7 +1349,7 @@ async def stats(c, pay_balance: int | None = None) -> dict:
         "active": await c.fetchval("SELECT count(*) FROM deals WHERE state <> ALL($1)", list(CLOSED)),
         "today": await c.fetchval("SELECT count(*) FROM deals WHERE created_at > now() - interval '1 day'"),
         "done_total": await c.fetchval("SELECT count(*) FROM deals WHERE state='DONE'"),
-        "ledger_micro": int(held_) - int(out_),        # 장부상 지갑에 있어야 할 돈 (맡긴 돈 − 실제로 보낸 돈, 번 수수료 포함)
+        "ledger_micro": int(held_) - int(out_),        # 장부상 지갑에 있어야 할 돈 (예치금 − 실제로 보낸 돈, 번 수수료 포함)
         "fees_micro": int(fees),
         "pending_approvals": await c.fetchval("SELECT count(*) FROM approvals WHERE status='pending'"),
         "held_approvals": await c.fetchval("SELECT count(*) FROM approvals WHERE status='held'"),

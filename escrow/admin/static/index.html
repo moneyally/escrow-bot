@@ -94,7 +94,7 @@ const VIEWS = {
           .map(([k,v]) => `<div class="card stat"><b>${v}</b><span>${k}</span></div>`).join("")}
       </div>
       <div class="card">
-        <div>장부상 지갑에 있어야 할 돈: <b>${esc(s.ledger)} USDT</b> <span class="mute">(맡긴 돈 − 보낸 돈, 번 수수료 포함)</span></div>
+        <div>장부상 지갑에 있어야 할 돈: <b>${esc(s.ledger)} USDT</b> <span class="mute">(예치금 − 보낸 돈, 번 수수료 포함)</span></div>
         <div>실제 지갑 잔액: <b>${s.wallet != null ? esc(s.wallet) + " USDT" : "아직 조회 전"}</b>
           ${diff != null ? (diff === 0 ? ' <span class="tag">일치</span>' : ` <span class="tag" style="color:var(--${diff<0?'bad':'warn'})">차이 ${micro(diff)}</span>`) : ""}</div>
         <div>번 수수료: <b>${esc(s.fees)} USDT</b></div>
@@ -237,7 +237,7 @@ async function openDeal(code) {
       <button class="btn ghost" onclick="go(tab)">← 목록</button></div>
       <div class="mute">만든 때 ${new Date(d.deal.created_at).toLocaleString("ko-KR")} · 수수료 ${micro(d.deal.fee_micro)} USDT ${d.deal.close_reason ? "· " + esc(d.deal.close_reason) : ""}</div>
       ${table(["사람","역할","공지","예치","완료","남은 몫"], d.parties.map(p => [names[p.tg_id], p.role==='creator'?'신청자':'상대', p.notice_ok?'확인':'-',
-        {deposit:'맡김',none:'안 맡김'}[p.choice]||'-', p.complete?'누름':'-', (d.balances[p.tg_id] ?? "0") + " USDT"]), true)}</div>
+        {deposit:'예치',none:'예치 안 함'}[p.choice]||'-', p.complete?'누름':'-', (d.balances[p.tg_id] ?? "0") + " USDT"]), true)}</div>
     ${isDispute ? `<div class="card badbox"><b>분쟁 결정</b><div class="mute">남은 돈을 어떻게 나눌지 (합계가 남은 금액과 같아야 함). 수수료 비우면 거래 수수료 그대로.</div>
       ${d.parties.map(p => `<div class="row">${names[p.tg_id]} <input data-plan="${p.tg_id}" placeholder="USDT" inputmode="decimal"></div>`).join("")}
       <div class="row"><input id="rfee" placeholder="수수료 (선택)" inputmode="decimal"><button class="btn bad" onclick="resolve('${d.deal.code}')">이대로 결정</button>

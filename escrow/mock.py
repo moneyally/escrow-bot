@@ -34,12 +34,12 @@ def notice_mine():
 
 
 def choose():
-    return (T.choose(CODE, [("나", None), (PARTNER, "deposit")]) + f"\n\n<i>(연습) {PARTNER} 님은 맡기기를 골랐어요.</i>",
-            kb([("맡기기", "m:dep"), ("안 맡기기", "m:nodep")], [QUIT]))
+    return (T.choose(CODE, [("나", None), (PARTNER, "deposit")]) + f"\n\n<i>(연습) {PARTNER} 님은 예치하기를 골랐어요.</i>",
+            kb([("예치하기", "m:dep"), ("예치 안 함", "m:nodep")], [QUIT]))
 
 
 def ask_amount():
-    return ("얼마 맡겨볼까요? (연습)\n실제로는 숫자를 직접 보내요.",
+    return ("얼마 예치해볼까요? (연습)\n실제로는 숫자를 직접 보내요.",
             kb([("100", "m:amt:100"), ("1,000", "m:amt:1000"), ("10,000", "m:amt:10000")], [QUIT]))
 
 
@@ -73,7 +73,7 @@ def complete_wait():
 def split(mine: int, theirs: int, fee: int):
     rows = ([("나", mine * MICRO)] if mine else []) + [(PARTNER, theirs * MICRO)]
     return (T.split_ask(CODE, rows, sum(v for _, v in rows), fee),
-            kb([("각자 맡긴 만큼 돌려받기", "m:sp")], [("전액 나에게", "m:sp")], [(f"전액 {PARTNER} 에게", "m:sp")],
+            kb([("각자 예치한 만큼 돌려받기", "m:sp")], [("전액 나에게", "m:sp")], [(f"전액 {PARTNER} 에게", "m:sp")],
                [("직접 입력", "m:sp")], [QUIT]))
 
 
@@ -82,7 +82,7 @@ def finished():
             "<b>연습 끝.</b> 이제 실제 거래를 시작해도 돼요.", None)
 
 
-PARTIAL_INFO = "부분 지급: 내가 맡긴 돈 중 일부를 상대에게 먼저 보내는 거예요. 실제론 금액 입력 → 상대 주소 → 송금 순서예요."
+PARTIAL_INFO = "부분 지급: 내 예치금 중 일부를 상대에게 먼저 보내는 거예요. 실제론 금액 입력 → 상대 주소 → 송금 순서예요."
 SOS_INFO = "관리자 호출: 거래가 잠기고 관리자가 증빙을 보고 분배를 정해요. 연습에선 눌러도 아무 일 없어요."
 ON_NOTICE_FULL = T.NOTICE_FULL
 

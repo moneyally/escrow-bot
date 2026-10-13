@@ -92,7 +92,7 @@ export function DealDetail({ code, nav, tick }: { code: string; nav: Nav; tick: 
       <Group title="사람">
         {d.parties.map((p) => (
           <Row key={p.tg_id} label={<>{name(p.tg_id)} <span className="sub">{p.role === "creator" ? "신청자" : "상대"}</span></>}
-            detail={`공지 ${p.notice_ok ? "확인" : "-"} · ${({ deposit: "맡김", none: "안 맡김" } as Record<string, string>)[p.choice || ""] || "선택 전"} · 완료 ${p.complete ? "누름" : "-"}`}>
+            detail={`공지 ${p.notice_ok ? "확인" : "-"} · ${({ deposit: "예치", none: "예치 안 함" } as Record<string, string>)[p.choice || ""] || "선택 전"} · 완료 ${p.complete ? "누름" : "-"}`}>
             <span className="num">{d.balances[String(p.tg_id)] ?? "0"} USDT</span>
           </Row>
         ))}
