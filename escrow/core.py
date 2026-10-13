@@ -33,6 +33,7 @@ DEFAULTS = {
     "fee_micro": 20 * MICRO,      # 고정 수수료 (비율 방식이면 최소 수수료)
     "fee_percent_bp": 0,          # 0 = 고정. 예: 150 = 예치 합계의 1.5%
     "fee_max_micro": 0,           # 비율 방식 최대 (0 = 없음)
+    "max_held_micro": 0,          # 지갑에 동시에 보관할 수 있는 최대 (0 = 제한 없음) — 주소 하나에 몰리는 위험 한도
     "min_micro": 50 * MICRO,
     "refund_fee_micro": 0,
     "stage_minutes": 30,
@@ -270,6 +271,30 @@ async def create_deal(c, ctx: Ctx, creator: int, partner: int | None, partner_hi
     return deal
 
 
+async def rating_of(c, tg_id: int) -> tuple[float | None, int]:
+    r = await c.fetchrow("SELECT avg(stars)::float AS a, count(*) AS n FROM ratings WHERE ratee=$1", tg_id)
+    return (round(r["a"], 1) if r["n"] else None), int(r["n"])
+
+
+async def rate(c, ctx: Ctx, deal_id: int, rater: int, stars: int):
+    """끝난 거래의 상대에게 별점 (당사자만, 거래당 한 번)."""
+    d = await _lock(c, deal_id)
+    _party(d, rater)
+    if d["state"] != "DONE":
+        raise Refused("끝난 거래만 평가할 수 있어요.")
+    if not 1 <= stars <= 5:
+        raise Refused(T.STALE)
+    r = await c.fetchrow("INSERT INTO ratings(deal_id, rater, ratee, stars) VALUES($1,$2,$3,$4) ON CONFLICT (deal_id, rater) DO NOTHING "
+                         "RETURNING id", deal_id, rater, _other(d, rater), stars)
+    if not r:
+        raise Refused("이미 평가했어요.")
+    await event(c, deal_id, rater, "rate", {"stars": stars})
+
+
+def kb_rate(deal_id: int):
+    return [[[("★" * n), f"d:rate:{deal_id}:{n}"] for n in range(1, 6)]]
+
+
 async def track_record(c, tg_id: int) -> tuple[int, int]:
     """이 봇에서 끝낸 거래 수, 분쟁이 열렸던 거래 수."""
     done = await c.fetchval("SELECT count(*) FROM deals WHERE (creator=$1 OR partner=$1) AND state='DONE'", tg_id)
@@ -280,7 +305,8 @@ async def track_record(c, tg_id: int) -> tuple[int, int]:
 
 async def _send_invite(c, deal):
     done, disputes = await track_record(c, deal["creator"])
-    await say(c, deal["partner"], T.invite(await label(c, deal["creator"]), deal["code"], deal["creator"], done, disputes),
+    avg, n = await rating_of(c, deal["creator"])
+    await say(c, deal["partner"], T.invite(await label(c, deal["creator"]), deal["code"], deal["creator"], done, disputes, avg, n),
               kb_invite(deal["id"]), deal["id"])
 
 
@@ -500,6 +526,10 @@ async def open_slot(c, ctx: Ctx, deal_id: int, tg_id: int, base: int):
                            deal_id, tg_id)
     if old and old["status"] != "waiting":
         raise Refused("이미 입금이 들어온 거래예요.")
+    cap = int(st["max_held_micro"])
+    if cap and int(await c.fetchval("SELECT coalesce(sum(amount_micro),0) FROM deposit_slots WHERE status IN ('waiting','received','confirmed') "
+                                    "AND deal_id IN (SELECT id FROM deals WHERE state <> ALL($1))", list(CLOSED))) + base > cap:
+        raise Refused("지금은 보관 한도가 차서 새 예치를 받을 수 없어요. 잠시 뒤에 다시 해주세요.")
     if await c.fetchval("SELECT count(*) FROM deposit_slots WHERE tg_id=$1 AND status='waiting' AND deal_id<>$2", tg_id, deal_id) >= MAX_OPEN_SLOTS:
         raise Refused("입금 기다리는 거래가 너무 많아요. 먼저 하나를 끝내거나 취소해주세요.")
     if old:
@@ -1077,6 +1107,30 @@ async def _receipts(c, d):
                              d["id"], p)
         await say(c, p, T.receipt(d["code"], int(dep), sum(r["amount_micro"] for r in rows), sum(r["fee_micro"] for r in rows),
                                   [r["tx_id"] for r in rows if r["tx_id"]]), deal_id=d["id"])
+        await say(c, p, T.rate_ask(d["code"], await label(c, _other(d, p))), kb_rate(d["id"]), d["id"])
+
+
+async def log_room_message(c, chat_id: int, tg_id: int, kind: str, text: str, file_id: str | None) -> bool:
+    """거래방에 올라온 글 → 그 방의 지금 거래 기록에 (분쟁 때 관리자가 봄)."""
+    deal_id = await c.fetchval("SELECT deal_id FROM rooms WHERE chat_id=$1 AND state='used'", chat_id)
+    if not deal_id:
+        return False
+    await c.execute("INSERT INTO deal_messages(deal_id, tg_id, source, kind, text, file_id) VALUES($1,$2,'room',$3,$4,$5)",
+                    deal_id, tg_id, kind, text[:4000], file_id)
+    return True
+
+
+async def add_evidence(c, ctx: Ctx, tg_id: int, kind: str, text: str, file_id: str | None) -> str | None:
+    """분쟁 중인 거래의 당사자가 1:1 로 보낸 글·사진·파일 = 증거로 저장. 거래코드 반환 (분쟁 중 아니면 None)."""
+    d = await c.fetchrow("SELECT * FROM deals WHERE state='DISPUTE' AND (creator=$1 OR partner=$1) ORDER BY id DESC LIMIT 1", tg_id)
+    if not d:
+        return None
+    await c.execute("INSERT INTO deal_messages(deal_id, tg_id, source, kind, text, file_id) VALUES($1,$2,'evidence',$3,$4,$5)",
+                    d["id"], tg_id, kind, text[:4000], file_id)
+    n = await c.fetchval("SELECT count(*) FROM deal_messages WHERE deal_id=$1 AND source='evidence'", d["id"])
+    if n in (1, 5, 20):
+        await say_admins(c, ctx, f"📎 <code>{d['code']}</code> 분쟁 증거 {n}건 (관리 페이지 거래 화면에서 봐요)", deal_id=d["id"])
+    return d["code"]
 
 
 async def check_deal(c, code: str, tg_id: int) -> str:

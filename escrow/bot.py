@@ -421,6 +421,9 @@ async def on_deal(update: Update, context: ContextTypes.DEFAULT_TYPE, parts: lis
             elif act == "addr":
                 po = await core.reopen_address(c, deal_id, uid)
                 dms.append((T.ask_address(po["code"], po["amount_micro"], 1), None))
+            elif act == "rate":
+                await core.rate(c, ctx, deal_id, uid, int(parts[2]))
+                drop = (True, "★" * int(parts[2]) + " 고마워요.")
             elif act in ("pok", "pno"):         # 아이디 없는 상대: 링크로 들어온 사람 확인
                 await core.confirm_claim(c, ctx, deal_id, uid, act == "pok")
                 drop = (True, "확인했어요." if act == "pok" else "거절했어요. 링크로 다른 분이 들어올 수 있어요.")
@@ -551,6 +554,11 @@ async def _private_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     inp = await db.fetchrow("SELECT * FROM inputs WHERE tg_id=$1 AND expires_at > now()", uid)
     if not inp:
+        async with db.tx() as c:
+            code = await core.add_evidence(c, ctx, uid, "text", text, None)
+        if code:
+            await send(context, uid, T.evidence_saved(code))
+            return
         await show_main(context, uid)
         await remind_addresses(context, uid)
         return
@@ -646,6 +654,41 @@ async def _input_address(context, uid: int, inp, text: str):
         raise core.Refused(T.ADDRESS_MISMATCH)
     async with db.tx() as c:
         await core.set_address(c, ctx, po["id"], uid, addr)
+
+
+def _media(msg) -> tuple[str, str, str | None]:
+    """(kind, 글, file_id) — 사진은 제일 큰 것."""
+    text = msg.text or msg.caption or ""
+    if msg.photo:
+        return "photo", text, msg.photo[-1].file_id
+    if msg.document:
+        return "document", text or (msg.document.file_name or ""), msg.document.file_id
+    if msg.video:
+        return "video", text, msg.video.file_id
+    return ("text" if msg.text else "other"), text, None
+
+
+async def on_room_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """거래방 글은 그 거래 기록으로 (분쟁 때 관리자가 관리 페이지에서 봄). 봇은 방 관리자라 모든 글을 받음."""
+    msg = update.effective_message
+    u = update.effective_user
+    if not msg or not u or u.is_bot:
+        return
+    db, _, _ = svc(context)
+    kind, text, fid = _media(msg)
+    async with db.tx() as c:
+        await core.log_room_message(c, msg.chat.id, u.id, kind, text, fid)
+
+
+async def on_private_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """1:1 로 온 사진·파일: 분쟁 중이면 증거로 저장."""
+    db, ctx, _ = svc(context)
+    msg = update.effective_message
+    uid = update.effective_user.id
+    kind, text, fid = _media(msg)
+    async with db.tx() as c:
+        code = await core.add_evidence(c, ctx, uid, kind, text, fid)
+    await send(context, uid, T.evidence_saved(code) if code else "사진·파일은 분쟁 중일 때만 증거로 받아요.")
 
 
 # ── 거래방 ───────────────────────────────────────────
@@ -984,6 +1027,8 @@ def build(cfg) -> Application:
     app.add_handler(ChatJoinRequestHandler(on_join_request))
     app.add_handler(ChatMemberHandler(on_my_member, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, on_private_text))
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.PHOTO | filters.Document.ALL | filters.VIDEO), on_private_media))
+    app.add_handler(MessageHandler(filters.ChatType.SUPERGROUP & ~filters.StatusUpdate.ALL, on_room_message))
     app.add_error_handler(on_error)
     return app
 

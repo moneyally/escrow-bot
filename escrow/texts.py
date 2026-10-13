@@ -84,8 +84,8 @@ def invite_sent(partner: str, code: str) -> str:
     return f"{partner} 님에게 거래 요청을 보냈어요.\n거래코드: <code>{code}</code>\n\n상대가 수락하면 알려드릴게요."
 
 
-def invite(creator: str, code: str, tg_id: int, done: int, disputes: int) -> str:
-    history = f"이 봇에서 끝낸 거래 {done}건" + (f" · 분쟁 {disputes}건" if disputes else "")
+def invite(creator: str, code: str, tg_id: int, done: int, disputes: int, avg: float | None = None, n: int = 0) -> str:
+    history = f"이 봇에서 끝낸 거래 {done}건" + (f" · 분쟁 {disputes}건" if disputes else "") + (f" · ⭐{avg} ({n})" if n else "")
     return (f"<b>거래 요청</b>\n{LINE}\n{creator} 님이 거래를 요청했어요.\n"
             f"숫자 ID: <code>{tg_id}</code> · {history}\n거래코드: <code>{code}</code>\n\n"
             "아는 사람인지 꼭 확인하고 수락하세요. 이름은 누구나 바꿀 수 있으니 숫자 ID 로 확인하세요.")
@@ -278,7 +278,7 @@ def expired(code: str, refunded: bool) -> str:
 
 def dispute_opened(code: str, who_: str) -> str:
     return (f"{who_} 님이 관리자를 불렀어요. (<code>{code}</code>)\n"
-            "관리자가 확인할 때까지 거래가 잠깁니다. 증빙(대화·사진)이 있으면 이 방에 올려주세요.")
+            "관리자가 확인할 때까지 거래가 잠깁니다. 증빙(대화·사진)이 있으면 이 방에 올려주세요." + DISPUTE_HELP)
 
 
 def dispute_decided(code: str, rows: list[tuple[str, int]]) -> str:
@@ -365,3 +365,15 @@ def claim_rejected(code: str) -> str:
 
 def room_making(code: str) -> str:
     return f"거래방을 만들고 있어요. 잠시 뒤 입장 링크를 보내드릴게요. (<code>{code}</code>)"
+
+
+def rate_ask(code: str, other: str) -> str:
+    return f"{other} 님과의 거래(<code>{code}</code>)는 어땠어요? 별점을 남겨 주시면 다음 분들이 참고해요."
+
+
+def evidence_saved(code: str) -> str:
+    return f"분쟁 자료로 저장했어요. (<code>{code}</code>) 관리자가 확인해요. 더 있으면 계속 보내주세요."
+
+
+DISPUTE_HELP = ("\n\n분쟁 중엔 봇 1:1 로 대화 캡처·사진·파일·tx 해시를 보내주시면 증거로 저장돼요.\n"
+                "관리자는 먼저 DM 하지 않아요. 관리자라며 연락 오는 계정은 사칭이에요.")

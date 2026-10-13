@@ -52,6 +52,8 @@ type Detail = {
   slots: { tg_id: number; amount_micro: number; status: string; tx_id: string | null }[];
   payouts: { tg_id: number; kind: string; amount_micro: number; fee_micro: number; address: string | null; status: string; tx_id: string | null }[];
   events: { at: string; actor: number | null; kind: string; data: unknown }[];
+  messages: { id: number; tg_id: number | null; username: string | null; source: string; kind: string; text: string; file_id: string | null; created_at: string }[];
+  ratings: { rater: number; stars: number }[];
 };
 
 export function DealDetail({ code, nav, tick }: { code: string; nav: Nav; tick: number }) {
@@ -118,6 +120,32 @@ export function DealDetail({ code, nav, tick }: { code: string; nav: Nav; tick: 
                 { title: "이 분배로 결정", message: "받을 사람에게 바로 주소를 물어봐요.", confirm: "결정", destructive: true });
             }}>이대로 결정</Button>
           </div>
+        </Group>
+      )}
+
+      {d.messages.length > 0 && (
+        <Group title={`대화 · 증거 (${d.messages.length})`} footer="거래방에 올라온 글과, 분쟁 중 1:1 로 받은 증거예요.">
+          <div className="chat">
+            {d.messages.map((m) => (
+              <div key={m.id} className={`msg${m.source === "evidence" ? " evidence" : ""}${m.tg_id === d.parties[0]?.tg_id ? " left" : " right"}`}>
+                <div className="msg-meta">{name(m.tg_id)} · {when(m.created_at)}{m.source === "evidence" && <Badge tone="orange">증거</Badge>}</div>
+                {m.file_id && m.kind === "photo" && (
+                  <a href={`/api/file/${encodeURIComponent(m.file_id)}`} target="_blank" rel="noopener noreferrer">
+                    <img src={`/api/file/${encodeURIComponent(m.file_id)}`} alt="첨부 사진" loading="lazy" />
+                  </a>
+                )}
+                {m.file_id && m.kind !== "photo" && (
+                  <a className="file" href={`/api/file/${encodeURIComponent(m.file_id)}`} target="_blank" rel="noopener noreferrer">📎 {m.kind} 열기</a>
+                )}
+                {m.text && <div className="msg-text">{m.text}</div>}
+              </div>
+            ))}
+          </div>
+        </Group>
+      )}
+      {d.ratings.length > 0 && (
+        <Group title="평점">
+          {d.ratings.map((r) => <Row key={r.rater} label={`${name(r.rater)} 가 준 별점`}><span className="num">{"★".repeat(r.stars)}</span></Row>)}
         </Group>
       )}
 

@@ -304,3 +304,56 @@ async def test_d10_percent_fee_is_fixed_at_start(users, ctx):
     d2, _ = await to_funded(db, ctx, 1800 * U, 0)
     assert (await db.fetchval("SELECT fee_micro FROM deals WHERE id=$1", d2["id"])) == 27 * U       # 1800×1.5% = 27
     assert core.deal_fee(20 * U, 150, 30 * U, 5000 * U) == 30 * U                                     # 최대
+
+
+async def test_ratings_once_per_party_after_done(users, ctx):
+    db = users
+    d, _ = await to_funded(db, ctx, 100 * U, 0)
+    async with db.tx() as c:
+        try:
+            await core.rate(c, ctx, d["id"], A, 5)
+            raise AssertionError("끝나기 전 평가됨")
+        except core.Refused:
+            pass
+    await finish_split(db, ctx, d, "b")
+    await give_addresses(db, ctx, d)
+    await _approve_all(db, ctx, "final")
+    await _send_all(db, ctx, d["id"])
+    assert await db.fetchval("SELECT count(*) FROM outbox WHERE chat_id=$1 AND text LIKE '%별점%'", A) == 1
+    async with db.tx() as c:
+        await core.rate(c, ctx, d["id"], A, 4)
+    for who, st in ((A, 5), (999, 5)):
+        try:
+            async with db.tx() as c:
+                await core.rate(c, ctx, d["id"], who, st)
+            raise AssertionError("두 번 / 남이 평가됨")
+        except core.Refused:
+            pass
+    async with db.tx() as c:
+        assert await core.rating_of(c, B) == (4.0, 1)
+
+
+async def test_room_log_and_dispute_evidence(users, ctx):
+    db = users
+    d, _ = await to_funded(db, ctx, 100 * U, 0, room=True)
+    async with db.tx() as c:
+        assert await core.log_room_message(c, -1001, A, "text", "물건 보냈어요", None)
+        assert await core.add_evidence(c, ctx, A, "photo", "", "FILE1") is None, "분쟁 아닐 땐 증거 아님"
+        await core.open_dispute(c, ctx, d["id"], B)
+    async with db.tx() as c:
+        assert await core.add_evidence(c, ctx, B, "photo", "캡처", "FILE2") == d["code"]
+    rows = await db.fetch("SELECT source, kind FROM deal_messages WHERE deal_id=$1 ORDER BY id", d["id"])
+    assert [(r["source"], r["kind"]) for r in rows] == [("room", "text"), ("evidence", "photo")]
+
+
+async def test_exposure_cap_blocks_new_deposit(users, ctx):
+    db = users
+    async with db.tx() as c:
+        await core.set_setting(c, "max_held_micro", 150 * U, ADMIN)
+    await to_funded(db, ctx, 100 * U, 0)
+    d = await _deposit_stage(db, ctx)
+    try:
+        await _slot(db, ctx, d["id"], 100 * U)
+        raise AssertionError("보관 한도 넘게 받음")
+    except core.Refused as e:
+        assert "한도" in str(e)

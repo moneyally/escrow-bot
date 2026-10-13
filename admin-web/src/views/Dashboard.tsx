@@ -3,6 +3,7 @@ import { api, type Stats } from "../api";
 import type { Nav } from "../App";
 import { Badge, Group, Mono, Row } from "../ui";
 import { KIND, STATE, micro, when } from "../labels";
+import { RevenueChart } from "./Chart";
 
 type Me = { tg_id: number; bot_name: string; pay_address: string; stub: string[] };
 type Todo = { stuck: { code: string; state: string; since: string }[]; watch_age: number | null;
@@ -49,6 +50,7 @@ export function Dashboard({ stats: s, nav, tick }: { stats: Stats | null; nav: N
           ))}
         </Group>
       )}
+      <RevenueChart tick={tick} />
       <Group title="지갑" footer="장부 = 예치금 − 보낸 돈 (번 수수료 포함). 지갑 잔액은 한 시간마다 조회해요.">
         <Row label="장부상 있어야 할 돈"><span className="num">{s.ledger} USDT</span></Row>
         <Row label="실제 지갑 잔액">

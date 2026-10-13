@@ -218,3 +218,28 @@ ALTER TABLE deals ADD COLUMN IF NOT EXISTS fee_max_micro BIGINT NOT NULL DEFAULT
 -- 아이디 없는 상대 링크: 연 사람을 신청자가 확인할 때까지 대기
 ALTER TABLE deals ADD COLUMN IF NOT EXISTS open_link BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE deals ADD COLUMN IF NOT EXISTS pending_partner BIGINT;
+
+-- 거래 뒤 평점 (거래당 한 사람 한 번, 당사자만)
+CREATE TABLE IF NOT EXISTS ratings (
+    id          BIGSERIAL PRIMARY KEY,
+    deal_id     BIGINT NOT NULL REFERENCES deals (id),
+    rater       BIGINT NOT NULL REFERENCES users (tg_id),
+    ratee       BIGINT NOT NULL REFERENCES users (tg_id),
+    stars       INT NOT NULL CHECK (stars BETWEEN 1 AND 5),
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (deal_id, rater)
+);
+CREATE INDEX IF NOT EXISTS ratings_ratee ON ratings (ratee);
+
+-- 거래 대화 기록: 거래방 글 + 분쟁 중 1:1 로 보낸 증거 (분쟁 판단용). 파일은 텔레그램 file_id 로만.
+CREATE TABLE IF NOT EXISTS deal_messages (
+    id          BIGSERIAL PRIMARY KEY,
+    deal_id     BIGINT NOT NULL REFERENCES deals (id),
+    tg_id       BIGINT,
+    source      TEXT NOT NULL CHECK (source IN ('room', 'evidence')),
+    kind        TEXT NOT NULL,              -- text · photo · document · video · other
+    text        TEXT NOT NULL DEFAULT '',
+    file_id     TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS deal_messages_deal ON deal_messages (deal_id, id);

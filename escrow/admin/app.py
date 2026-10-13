@@ -12,8 +12,9 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -267,6 +268,9 @@ def create_app(cfg=None, database: DB | None = None) -> FastAPI:
             "payouts": conv(await db().fetch("SELECT * FROM payouts WHERE deal_id=$1 ORDER BY id", d["id"])),
             "splits": conv(await db().fetch("SELECT * FROM splits WHERE deal_id=$1 ORDER BY id", d["id"])),
             "events": conv(await db().fetch("SELECT * FROM events WHERE deal_id=$1 ORDER BY id", d["id"])),
+            "messages": conv(await db().fetch("SELECT m.*, u.username FROM deal_messages m LEFT JOIN users u ON u.tg_id=m.tg_id "
+                                              "WHERE deal_id=$1 ORDER BY m.id LIMIT 2000", d["id"])),
+            "ratings": conv(await db().fetch("SELECT * FROM ratings WHERE deal_id=$1 ORDER BY id", d["id"])),
         }
 
 
@@ -349,6 +353,60 @@ def create_app(cfg=None, database: DB | None = None) -> FastAPI:
         """아직 안 보낸 지급 취소 → 받는 사람에게 주소를 다시 물음 (주소가 틀렸을 때)."""
         await run(core.cancel_payout, pid, tg, body.reason[:100])
         return {"result": "취소했어요. 받는 분에게 주소를 다시 물어봤어요."}
+
+    # ── 사용자 목록 · 매출 · 파일 ──
+    @app.get("/api/users")
+    async def users_list(q: str = "", sort: str = "recent", _: int = Depends(admin)):
+        order = {"recent": "u.updated_at DESC", "deals": "done DESC, u.updated_at DESC", "volume": "volume DESC",
+                 "disputes": "disputes DESC, u.updated_at DESC"}.get(sort, "u.updated_at DESC")
+        rows = await db().fetch(f"""
+            SELECT u.tg_id, u.username, u.name, u.banned, u.created_at, u.updated_at,
+                   (SELECT count(*) FROM deals d WHERE (d.creator=u.tg_id OR d.partner=u.tg_id) AND d.state='DONE') AS done,
+                   (SELECT count(*) FROM deals d WHERE (d.creator=u.tg_id OR d.partner=u.tg_id) AND d.state NOT IN ('DONE','CANCELLED')) AS active,
+                   (SELECT count(DISTINCT e.deal_id) FROM events e JOIN deals d ON d.id=e.deal_id
+                     WHERE (d.creator=u.tg_id OR d.partner=u.tg_id) AND e.kind='state' AND e.data->>'to'='DISPUTE') AS disputes,
+                   (SELECT coalesce(sum(s.amount_micro),0) FROM deposit_slots s WHERE s.tg_id=u.tg_id AND s.status='confirmed') AS volume,
+                   (SELECT avg(stars)::float FROM ratings r WHERE r.ratee=u.tg_id) AS rating,
+                   (SELECT count(*) FROM ratings r WHERE r.ratee=u.tg_id) AS ratings
+            FROM users u
+            WHERE ($1 = '' OR u.tg_id::text = $1 OR lower(u.username) LIKE '%' || lower($1) || '%' OR lower(u.name) LIKE '%' || lower($1) || '%')
+            ORDER BY {order} LIMIT 200""", q.strip().lstrip("@"))
+        return [{**{k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in dict(r).items()},
+                 "volume": fmt(r["volume"]), "rating": round(r["rating"], 1) if r["rating"] else None} for r in rows]
+
+    @app.get("/api/revenue")
+    async def revenue(days: int = 30, _: int = Depends(admin)):
+        """하루 단위 (서울 시간): 새 거래 · 끝난 거래 · 예치 금액 · 번 수수료."""
+        days = max(7, min(days, 180))
+        rows = await db().fetch("""
+            WITH d AS (SELECT generate_series((now() AT TIME ZONE 'Asia/Seoul')::date - ($1::int - 1), (now() AT TIME ZONE 'Asia/Seoul')::date,
+                                              interval '1 day')::date AS day)
+            SELECT d.day,
+              (SELECT count(*) FROM deals x WHERE (x.created_at AT TIME ZONE 'Asia/Seoul')::date = d.day) AS new_deals,
+              (SELECT count(*) FROM deals x WHERE x.state='DONE' AND (x.closed_at AT TIME ZONE 'Asia/Seoul')::date = d.day) AS done,
+              (SELECT coalesce(sum(s.amount_micro),0) FROM deposit_slots s WHERE s.status='confirmed'
+                 AND (s.updated_at AT TIME ZONE 'Asia/Seoul')::date = d.day) AS volume,
+              (SELECT coalesce(sum(p.fee_micro),0) FROM payouts p WHERE p.status='confirmed'
+                 AND (p.updated_at AT TIME ZONE 'Asia/Seoul')::date = d.day) AS fees
+            FROM d ORDER BY d.day""", days)
+        return [{"day": r["day"].isoformat(), "new_deals": r["new_deals"], "done": r["done"],
+                 "volume_micro": int(r["volume"]), "fees_micro": int(r["fees"])} for r in rows]
+
+    @app.get("/api/file/{file_id}")
+    async def tg_file(file_id: str, _: int = Depends(admin)):
+        """분쟁 증거·거래방 사진을 관리 페이지에서 보기 (봇 토큰으로 텔레그램에서 받아 그대로 전달)."""
+        if not cfg.bot_token or not file_id.replace("-", "").replace("_", "").isalnum():
+            raise HTTPException(404, "없음")
+        async with httpx.AsyncClient(timeout=30) as h:
+            r = await h.get(f"https://api.telegram.org/bot{cfg.bot_token}/getFile", params={"file_id": file_id})
+            path = (r.json().get("result") or {}).get("file_path")
+            if not path:
+                raise HTTPException(404, "텔레그램에서 파일을 못 찾았어요")
+            f = await h.get(f"https://api.telegram.org/file/bot{cfg.bot_token}/{path}")
+        ctype = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp", "mp4": "video/mp4",
+                 "pdf": "application/pdf"}.get(path.rsplit(".", 1)[-1].lower(), "application/octet-stream")
+        return Response(f.content, media_type=ctype, headers={"Cache-Control": "private, max-age=3600",
+                                                              "Content-Disposition": "inline", "X-Content-Type-Options": "nosniff"})
 
     # ── 사용자 ──
     @app.get("/api/users/{key}")

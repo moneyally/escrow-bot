@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api, ApiError, post } from "../api";
 import type { Nav } from "../App";
 import { Badge, Button, Group, Mono, Row, useUi } from "../ui";
@@ -10,10 +10,18 @@ type U = {
   addresses: string[];
 };
 
+type L = { tg_id: number; username: string | null; name: string; banned: boolean; done: number; active: number; disputes: number;
+  volume: string; rating: number | null; ratings: number; updated_at: string };
+
 export function Users({ nav }: { nav: Nav }) {
   const ui = useUi();
   const [q, setQ] = useState("");
   const [u, setU] = useState<U | null>(null);
+  const [list, setList] = useState<L[] | null>(null);
+  const [sort, setSort] = useState("recent");
+  const loadList = (query = q) =>
+    api<L[]>(`/api/users?sort=${sort}&q=${encodeURIComponent(query.trim())}`).then(setList).catch(() => {});
+  useEffect(() => { loadList(); }, [sort]);   // eslint-disable-line react-hooks/exhaustive-deps
   async function load(key = q.trim()) {
     if (!key) return;
     try { setU(await api<U>("/api/users/" + encodeURIComponent(key))); }
@@ -27,10 +35,27 @@ export function Users({ nav }: { nav: Nav }) {
   }
   return (
     <>
-      <form className="filters" onSubmit={(e) => { e.preventDefault(); load(); }}>
-        <input className="field" type="search" placeholder="@아이디 또는 숫자 ID" value={q} onChange={(e) => setQ(e.target.value)} />
+      <form className="filters" onSubmit={(e) => { e.preventDefault(); setU(null); loadList(); }}>
+        <select className="field" value={sort} onChange={(e) => setSort(e.target.value)} aria-label="정렬">
+          <option value="recent">최근 활동순</option><option value="deals">끝낸 거래순</option>
+          <option value="volume">예치 금액순</option><option value="disputes">분쟁 많은 순</option>
+        </select>
+        <input className="field" type="search" placeholder="@아이디 · 이름 · 숫자 ID" value={q} onChange={(e) => setQ(e.target.value)} />
         <Button type="submit">찾기</Button>
       </form>
+      {!u && list && (
+        <Group title={`사용자 ${list.length}명`}>
+          {list.map((x) => (
+            <Row key={x.tg_id} chevron onClick={() => load(String(x.tg_id))}
+              label={<>{x.username ? "@" + x.username : x.name || x.tg_id} {x.banned && <Badge tone="red">제한</Badge>}
+                {x.disputes > 0 && <Badge tone="orange">분쟁 {x.disputes}</Badge>}</>}
+              detail={`끝낸 거래 ${x.done} · 진행 중 ${x.active} · 예치 ${x.volume} USDT · ${when(x.updated_at)}`}>
+              {x.rating != null && <span className="num">⭐{x.rating} ({x.ratings})</span>}
+            </Row>
+          ))}
+        </Group>
+      )}
+      {u && <div className="actions left" style={{ marginBottom: 12 }}><Button tone="plain" onClick={() => setU(null)}>‹ 목록</Button></div>}
       {u && (
         <>
           <Group>
