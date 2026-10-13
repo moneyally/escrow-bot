@@ -155,6 +155,21 @@ def create_app(cfg=None, database: DB | None = None) -> FastAPI:
             s[k.replace("_micro", "")] = fmt(s[k]) if s[k] is not None else None
         return s
 
+    @app.get("/api/todo")
+    async def todo(_: int = Depends(admin)):
+        """대시보드 '오늘 할 일': 오래 멈춘 거래 · 감시 상태 · 단계별 자동 전환 근거."""
+        stuck = await db().fetch(
+            "SELECT code, state, updated_at FROM deals WHERE state = ANY($1) AND updated_at < now() - interval '6 hours' "
+            "ORDER BY updated_at LIMIT 30", ["START_REVIEW", "SPLIT", "ADDRESS", "PAYOUT", "REFUND", "DISPUTE", "FUNDED"])
+        alive = await db().fetchval("SELECT value FROM kv WHERE key='watch_alive'")
+        hints = []
+        for m in core.MODES:
+            r = await db().fetchrow("SELECT count(*) AS n, count(*) FILTER (WHERE status='approved') AS ok FROM ("
+                                    "SELECT status FROM approvals WHERE kind=$1 AND status IN ('approved','held') ORDER BY id DESC LIMIT 30) t", m)
+            hints.append({"mode": m, "recent": r["n"], "approved": r["ok"]})
+        return {"stuck": [{"code": r["code"], "state": r["state"], "since": r["updated_at"].isoformat()} for r in stuck],
+                "watch_age": (int(time.time()) - int(alive)) if alive else None, "hints": hints}
+
     # ── 확인 대기 ──
     @app.get("/api/approvals")
     async def approvals(_: int = Depends(admin)):
@@ -310,7 +325,9 @@ def create_app(cfg=None, database: DB | None = None) -> FastAPI:
                                 "WHERE ($1 = '' OR p.status=$1) ORDER BY p.id DESC LIMIT 300", status)
         return [{"id": r["id"], "code": r["code"], "user": r["username"] or r["tg_id"], "kind": r["kind"], "status": r["status"],
                  "address": r["address"], "amount": fmt(r["amount_micro"]), "amount_exact": fmt_exact(r["amount_micro"]),
-                 "fee": fmt(r["fee_micro"]), "tx_id": r["tx_id"]} for r in rows]
+                 "fee": fmt(r["fee_micro"]), "tx_id": r["tx_id"],
+                 "same_twin": sum(1 for x in rows if x["status"] == "approved" and x["address"] == r["address"]
+                                  and x["amount_micro"] == r["amount_micro"]) > 1} for r in rows]
 
 
     @app.post("/api/payouts/{pid}/done")

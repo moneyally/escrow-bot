@@ -181,7 +181,7 @@ async def test_admin_settings_validation(users):
 
 async def test_admin_dispute_resolve(users, ctx):
     db = users
-    from test_core import to_funded
+    from test_core import U, to_funded
     d, slots = await to_funded(db, ctx, 100 * MICRO, 0)
     async with db.tx() as c:
         await core.open_dispute(c, ctx, d["id"], A)
@@ -205,3 +205,14 @@ async def test_serves_react_build_and_assets(users):
         js = re.search(r'src="(/assets/[^"]+\.js)"', r.text).group(1)
         assert (await c.get(js)).status_code == 200
         assert (await c.get("/api/stats")).status_code == 401
+
+
+async def test_todo_lists_stuck_deals_and_watch_state(users, ctx):
+    from test_core import U, to_funded
+    db = users
+    d, _ = await to_funded(db, ctx, 100 * U)
+    await db.execute("UPDATE deals SET updated_at=now() - interval '7 hours' WHERE id=$1", d["id"])
+    async with await client(db) as c:
+        j = (await c.get("/api/todo")).json()
+    assert [s["code"] for s in j["stuck"]] == [d["code"]] and j["watch_age"] is None
+    assert {h["mode"] for h in j["hints"]} == set(core.MODES)

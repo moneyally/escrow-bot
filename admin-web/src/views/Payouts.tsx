@@ -4,7 +4,8 @@ import type { Nav } from "../App";
 import { Badge, Button, Empty, Group, Mono, Table, copyText, useUi } from "../ui";
 import { PAYOUT_KIND } from "../labels";
 
-type P = { id: number; kind: string; code: string; user: string; amount: string; amount_exact: string; fee: string; address: string; tx_id: string | null };
+type P = { id: number; kind: string; code: string; user: string; amount: string; amount_exact: string; fee: string; address: string;
+  tx_id: string | null; same_twin?: boolean };
 
 export function Payouts({ nav, tick }: { nav: Nav; tick: number }) {
   const ui = useUi();
@@ -48,6 +49,7 @@ export function Payouts({ nav, tick }: { nav: Nav; tick: number }) {
               <span className="sub">수수료 {p.fee}</span>
             </div>
             <div className="addr"><Mono>{p.address}</Mono></div>
+            {p.same_twin && <p className="sub">⚠️ 같은 주소·같은 금액 지급이 또 있어요. 보낸 순서대로 하나씩 연결돼요.</p>}
             <div className="actions left">
               <Button tone="secondary" small onClick={() => copyText(p.address, ui)}>주소 복사</Button>
               <Button tone="secondary" small onClick={() => copyText(p.amount_exact, ui)}>금액 복사</Button>
