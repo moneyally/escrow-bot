@@ -1,0 +1,7 @@
+[Unit]
+Description=Escrow: pull and apply new code from GitHub main
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /opt/escrow/deploy/update.sh

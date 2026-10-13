@@ -14,7 +14,7 @@ APT="apt-get -o DPkg::Lock::Timeout=600"
 DEBIAN_FRONTEND=noninteractive dpkg --configure -a 2>&1 | tail -n 40 || true
 $APT update -q
 DEBIAN_FRONTEND=noninteractive $APT install -yq postgresql python3-venv python3-pip git ufw debian-keyring \
-    debian-archive-keyring apt-transport-https curl
+    debian-archive-keyring apt-transport-https curl rsync gnupg fail2ban
 if ! command -v caddy >/dev/null; then
   curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/gpg.key | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
   curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt > /etc/apt/sources.list.d/caddy-stable.list
@@ -51,12 +51,18 @@ CUR=$(grep '^DATABASE_URL=' "$APP/.env" | sed -E 's#.*://escrow:([^@]*)@.*#\1#')
 [ -n "$CUR" ] && sudo -u postgres psql -qc "ALTER ROLE escrow PASSWORD '$CUR'"
 chown escrow: "$APP/.env"; chmod 600 "$APP/.env"
 
-cp "$APP"/deploy/escrow-*.service /etc/systemd/system/
+cp "$APP"/deploy/escrow-*.service "$APP"/deploy/escrow-*.timer /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable -q escrow-bot escrow-watcher escrow-admin
+systemctl enable -q escrow-watcher escrow-admin
 systemctl restart escrow-admin escrow-watcher
-# 봇은 BOT_TOKEN 이 있어야 켬 (없으면 계속 재시작만 함)
-if grep -qE '^BOT_TOKEN=.+' "$APP/.env"; then systemctl restart escrow-bot; fi
+# 봇은 BOT_TOKEN 이 있어야 켬 (없이 켜 두면 재부팅 때마다 재시작만 반복)
+if grep -qE '^BOT_TOKEN=.+' "$APP/.env"; then systemctl enable -q escrow-bot; systemctl restart escrow-bot; else systemctl disable -q escrow-bot || true; fi
+# 새 코드 자동 반영 (GitHub main → 2분마다 확인). 배포 키가 없으면 만들어 둠 (저장소를 비공개로 바꾸면 GitHub 에 등록)
+chmod +x "$APP/deploy/update.sh"
+[ -f /root/.ssh/escrow_deploy ] || { install -d -m 700 /root/.ssh; ssh-keygen -q -t ed25519 -N "" -C "escrow-server-deploy" -f /root/.ssh/escrow_deploy; }
+[ -f "$APP/.deployed_rev" ] || echo "${DEPLOYED_REV:-unknown}" > "$APP/.deployed_rev"
+systemctl enable -q --now escrow-update.timer
+echo "배포 키(공개): $(cat /root/.ssh/escrow_deploy.pub)"
 
 cat > /etc/caddy/Caddyfile <<CADDY
 $DOMAIN {
@@ -75,13 +81,24 @@ $( [ -n "${BOOT_ROUTE:-}" ] && printf '    handle_path /_boot/* {  # boot\n     
 CADDY
 systemctl reload caddy || systemctl restart caddy
 
-ufw allow OpenSSH >/dev/null; ufw allow 80/tcp >/dev/null; ufw allow 443/tcp >/dev/null; ufw --force enable >/dev/null
+ufw limit OpenSSH >/dev/null; ufw allow 80/tcp >/dev/null; ufw allow 443/tcp >/dev/null; ufw --force enable >/dev/null
+# SSH: 비밀번호 로그인 끔 (root 비밀번호가 메일로 나갔음 — 키로만. 급할 땐 헤츠너 웹 콘솔은 그대로 됨) + 무차별 대입 차단
+cat > /etc/ssh/sshd_config.d/10-escrow.conf <<'SSH'
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin prohibit-password
+SSH
+systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
+systemctl enable -q --now fail2ban || true
 
 # 매일 04:10 DB 백업, 14일 보관
 install -d -o postgres -m 700 /var/backups/escrow
 cat > /etc/cron.d/escrow-backup <<'CRON'
 10 4 * * * postgres pg_dump -Fc escrow > /var/backups/escrow/escrow-$(date +\%F).dump && find /var/backups/escrow -name '*.dump' -mtime +14 -delete
+# 서버 밖 사본: 암호화해서 첫 관리자 텔레그램으로 (실패하면 알림)
+30 4 * * * escrow cd /opt/escrow && /opt/escrow/.venv/bin/python -m escrow.backup >> /var/log/escrow-backup.log 2>&1
 CRON
+touch /var/log/escrow-backup.log && chown escrow: /var/log/escrow-backup.log
 
 echo
 echo "설치 끝. 남은 것:"
