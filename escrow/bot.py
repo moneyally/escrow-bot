@@ -295,8 +295,24 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, arg: str):
                 return
             await core.set_input(c, uid, "partner", None, None, 10)
         await q.answer()
-        await send(context, uid, T.ASK_PARTNER, [[("메뉴로", "menu:home")]])
+        await send(context, uid, T.ASK_PARTNER, [[("아이디 없는 상대 (링크로 초대)", "menu:link")], [("메뉴로", "menu:home")]])
         await remind_addresses(context, uid)
+        return
+    if arg == "link":
+        if await is_banned(db, uid):
+            await q.answer(T.BANNED.format(support=cfg.support)[:190], show_alert=True)
+            return
+        try:
+            async with db.tx() as c:
+                d = await core.create_deal(c, ctx, uid, None, None, open_link=True)
+                await c.execute("DELETE FROM inputs WHERE tg_id=$1 AND kind='partner'", uid)
+        except core.Refused as e:
+            await q.answer(str(e)[:190], show_alert=True)
+            return
+        await q.answer()
+        bot_user = context.application.bot_data.get("bot_username") or cfg.bot_username
+        await send(context, uid, T.open_link_made(d["code"], f"https://t.me/{bot_user}?start=join_{d['code']}"),
+                   [[("요청 취소", f"d:cx:{d['id']}")]])
         return
     kind = {"active": "active", "done": "done", "refund": "refund"}.get(arg)
     if not kind:
@@ -405,6 +421,9 @@ async def on_deal(update: Update, context: ContextTypes.DEFAULT_TYPE, parts: lis
             elif act == "addr":
                 po = await core.reopen_address(c, deal_id, uid)
                 dms.append((T.ask_address(po["code"], po["amount_micro"], 1), None))
+            elif act in ("pok", "pno"):         # 아이디 없는 상대: 링크로 들어온 사람 확인
+                await core.confirm_claim(c, ctx, deal_id, uid, act == "pok")
+                drop = (True, "확인했어요." if act == "pok" else "거절했어요. 링크로 다른 분이 들어올 수 있어요.")
             elif act == "inx":
                 await c.execute("DELETE FROM inputs WHERE tg_id=$1 AND kind <> 'address'", uid)
                 drop = (True, "그만뒀어요.")

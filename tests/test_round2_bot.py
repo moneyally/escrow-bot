@@ -167,3 +167,29 @@ async def test_d4_stopped_watcher_alerts_admin_once(users):
     alerts = [t for t in env.bot.texts(ADMIN) if "감시가 멈췄어요" in t]
     assert len(alerts) == 1
     assert any("하루 보고" in t for t in env.bot.texts(ADMIN))
+
+
+async def test_u6_partner_without_username_via_confirmed_link(users):
+    """아이디 없는 상대: 링크를 연 사람을 신청자가 확인해야 상대가 됨 (링크가 다른 사람에게 새도 안전)."""
+    from conftest import C
+    db = users
+    env = Env(db)
+    for who in (A, B, C):
+        await env.start(who)
+        await env.press(who, "t:skip")
+    await env.press(A, "menu:new")
+    await env.press(A, "menu:link")
+    d = await db.fetchrow("SELECT * FROM deals ORDER BY id DESC LIMIT 1")
+    assert d["open_link"] and f"start=join_{d['code']}" in env.bot.texts(A)[-1]
+    await env.start(C, [f"join_{d['code']}"])                     # 링크가 엉뚱한 사람에게 감
+    assert "숫자 ID" in env.bot.texts(A)[-1] and str(C) in env.bot.texts(A)[-1]
+    await env.start(B, [f"join_{d['code']}"])                     # 확인 중엔 다른 사람 못 들어옴
+    assert any("먼저 들어와서" in t for t in env.bot.texts(B)[-2:])
+    await env.press(A, env.last_button(A, "d:pno"))
+    assert any("참여할 수 없어요" in t for t in env.bot.texts(C)[-2:])
+    await env.start(B, [f"join_{d['code']}"])
+    await env.press(A, env.last_button(A, "d:pok"))
+    assert (await db.fetchval("SELECT partner FROM deals WHERE id=$1", d["id"])) == B
+    assert any("거래 요청" in t for t in env.bot.texts(B))
+    await env.press(B, env.last_button(B, "d:acc"))
+    assert (await db.fetchval("SELECT state FROM deals WHERE id=$1", d["id"])) != "INVITED"

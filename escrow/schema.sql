@@ -215,3 +215,6 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS dm_ok BOOLEAN NOT NULL DEFAULT FALSE;
 -- 수수료 방식 (거래 만들 때 설정을 그대로 저장 — 중간에 설정이 바뀌어도 그 거래는 그대로)
 ALTER TABLE deals ADD COLUMN IF NOT EXISTS fee_bp INT NOT NULL DEFAULT 0;
 ALTER TABLE deals ADD COLUMN IF NOT EXISTS fee_max_micro BIGINT NOT NULL DEFAULT 0;
+-- 아이디 없는 상대 링크: 연 사람을 신청자가 확인할 때까지 대기
+ALTER TABLE deals ADD COLUMN IF NOT EXISTS open_link BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE deals ADD COLUMN IF NOT EXISTS pending_partner BIGINT;

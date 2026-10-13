@@ -247,7 +247,8 @@ def kb_approval(approval_id):
 
 
 # ── 거래 시작 ─────────────────────────────────────────
-async def create_deal(c, ctx: Ctx, creator: int, partner: int | None, partner_hint: str | None):
+async def create_deal(c, ctx: Ctx, creator: int, partner: int | None, partner_hint: str | None, open_link: bool = False):
+    """open_link: 아이디(@) 없는 상대용 — 링크를 연 사람을 신청자가 직접 확인하고 나서 상대로 묶음."""
     st = await settings(c)
     if not st["new_deals"]:
         raise Refused(T.DEPOSITS_OFF)
@@ -258,10 +259,10 @@ async def create_deal(c, ctx: Ctx, creator: int, partner: int | None, partner_hi
         raise Refused(T.PARTNER_SELF)
     code = await _new_code(c)
     deal = await c.fetchrow(
-        "INSERT INTO deals(code, state, creator, partner, partner_hint, fee_micro, deadline, fee_bp, fee_max_micro) "
-        "VALUES($1,'INVITED',$2,$3,$4,$5,$6,$7,$8) RETURNING *",
+        "INSERT INTO deals(code, state, creator, partner, partner_hint, fee_micro, deadline, fee_bp, fee_max_micro, open_link) "
+        "VALUES($1,'INVITED',$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *",
         code, creator, partner, partner_hint, int(st["fee_micro"]), now() + timedelta(minutes=int(st["stage_minutes"])),
-        int(st["fee_percent_bp"]), int(st["fee_max_micro"]))
+        int(st["fee_percent_bp"]), int(st["fee_max_micro"]), open_link and not partner and not partner_hint)
     await c.execute("INSERT INTO deal_parties(deal_id, tg_id, role) VALUES($1,$2,'creator')", deal["id"], creator)
     await event(c, deal["id"], creator, "create", {"partner": partner, "hint": partner_hint})
     if partner:
@@ -298,11 +299,42 @@ async def claim_invite(c, ctx: Ctx, code: str, tg_id: int):
     hint = (d["partner_hint"] or "").lower()
     if not d["partner"] and hint and (not u or (u["username"] or "").lower() != hint):
         raise Refused(f"이 링크는 @{T.esc(d['partner_hint'])} 님 전용이에요.")
+    if not d["partner"] and d["open_link"]:
+        # 아이디 없는 상대 링크: 링크는 누구에게나 전달될 수 있으니, 연 사람을 신청자가 확인해야 상대로 묶음
+        if d["pending_partner"] and d["pending_partner"] != tg_id:
+            raise Refused("다른 분이 이 링크로 먼저 들어와서 신청자 확인을 기다리고 있어요.")
+        await c.execute("UPDATE deals SET pending_partner=$2, updated_at=now() WHERE id=$1", d["id"], tg_id)
+        await event(c, d["id"], tg_id, "claim_wait", {})
+        done, disputes = await track_record(c, tg_id)
+        u2 = await user(c, tg_id)
+        await say(c, d["creator"], T.claim_confirm(d["code"], await label(c, tg_id), tg_id, (u2["name"] if u2 else ""), done, disputes),
+                  [[["이 사람 맞아요", f"d:pok:{d['id']}"], ["아니에요", f"d:pno:{d['id']}"]]], d["id"])
+        await say(c, tg_id, T.claim_wait(d["code"]), deal_id=d["id"])
+        return d
     if not d["partner"]:
         d = await c.fetchrow("UPDATE deals SET partner=$2, updated_at=now() WHERE id=$1 RETURNING *", d["id"], tg_id)
         await event(c, d["id"], tg_id, "claim", {})
         await say(c, d["creator"], f"{await label(c, tg_id)} 님이 링크로 들어왔어요. 수락하면 이어집니다. (<code>{d['code']}</code>)",
                   deal_id=d["id"])
+    await _send_invite(c, d)
+    return d
+
+
+async def confirm_claim(c, ctx: Ctx, deal_id: int, tg_id: int, ok: bool):
+    """신청자가 '링크로 들어온 사람'을 확인. 맞으면 상대로 묶고 요청을 보냄, 아니면 비워서 다른 사람이 들어올 수 있게."""
+    d = await _lock(c, deal_id)
+    if d["creator"] != tg_id:
+        raise Refused(T.NOT_PARTY)
+    if d["state"] != "INVITED" or d["partner"] or not d["pending_partner"]:
+        raise Refused(T.STALE)
+    who = d["pending_partner"]
+    if not ok:
+        await c.execute("UPDATE deals SET pending_partner=NULL, updated_at=now() WHERE id=$1", deal_id)
+        await event(c, deal_id, tg_id, "claim_reject", {"who": who})
+        await say(c, who, T.claim_rejected(d["code"]), deal_id=deal_id)
+        return d
+    d = await c.fetchrow("UPDATE deals SET partner=$2, pending_partner=NULL, updated_at=now() WHERE id=$1 RETURNING *", deal_id, who)
+    await event(c, deal_id, tg_id, "claim_ok", {"who": who})
     await _send_invite(c, d)
     return d
 

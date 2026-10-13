@@ -66,7 +66,7 @@ def main_menu(bot_name: str, support: str) -> str:
 
 
 ASK_PARTNER = ("<b>거래 신청</b>\n\n상대 텔레그램 아이디를 보내주세요.\n예: <code>@username</code>\n\n"
-               "그만두려면 '취소'라고 보내면 돼요.")
+               "상대가 아이디(@)가 없으면 아래 [아이디 없는 상대]를 누르세요.\n그만두려면 '취소'라고 보내면 돼요.")
 PARTNER_SELF = "본인하고는 거래할 수 없어요. 상대 아이디를 보내주세요."
 PARTNER_BAD = "아이디 모양이 아니에요. @ 붙여서 다시 보내주세요. 예: <code>@username</code>"
 CANCELLED_INPUT = "그만뒀어요."
@@ -341,3 +341,23 @@ def check_result(code: str, state: str, parties: str | None) -> str:
 
 
 CHECK_NONE = "❌ 그런 거래코드는 이 봇에 없어요. 다른 봇이나 계정이 보낸 거라면 사칭일 수 있어요. 돈을 보내지 마세요."
+
+
+def open_link_made(code: str, link: str) -> str:
+    return (f"<b>초대 링크</b> (거래 <code>{code}</code>)\n{esc(link)}\n\n"
+            "이 링크를 상대에게만 보내주세요. 누가 링크로 들어오면 그 사람의 숫자 ID·이름을 보여드릴게요.\n"
+            "맞는 사람인지 확인하고 [이 사람 맞아요]를 눌러야 거래가 이어져요. 30분 안에 들어와야 해요.")
+
+
+def claim_confirm(code: str, who: str, tg_id: int, name: str, done: int, disputes: int) -> str:
+    history = f"이 봇에서 끝낸 거래 {done}건" + (f" · 분쟁 {disputes}건" if disputes else "")
+    return (f"<b>링크로 누가 들어왔어요</b> (<code>{code}</code>)\n{LINE}\n{who}\n이름: {esc(name) or '-'}\n"
+            f"숫자 ID: <code>{tg_id}</code>\n{history}\n{LINE}\n거래하려던 사람이 맞나요? 아니면 [아니에요]를 눌러주세요.")
+
+
+def claim_wait(code: str) -> str:
+    return f"신청자에게 확인을 요청했어요. 확인되면 거래 요청이 와요. (<code>{code}</code>)"
+
+
+def claim_rejected(code: str) -> str:
+    return f"신청자가 다른 사람이라고 했어요. 이 거래(<code>{code}</code>)에는 참여할 수 없어요."

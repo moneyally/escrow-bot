@@ -71,6 +71,8 @@ fi
 rm -rf "$BACK"
 echo "$NEW" >"$APP/.deployed_rev"
 rm -f "$APP/.failed_rev"
-say "✅ 서버 갱신 끝: $(git -C "$SRC" log -1 --format=%s FETCH_HEAD 2>/dev/null | cut -c1-80) (${NEW:0:7})"
+# 알림 문구: 커밋 메시지의 '알림:' 줄(한국어 요약)만 보냄. 없으면 버전만.
+NOTE=$(git -C "$SRC" log -1 --format=%B FETCH_HEAD 2>/dev/null | grep -m1 '^알림:' | cut -c1-200 | sed 's/^알림: *//' || true)
+say "✅ 서버 갱신 끝${NOTE:+: $NOTE} (${NEW:0:7})"
 # 첫 설치용 부트 통로가 닫혔으면 남은 파일 정리 (1회용 토큰 포함)
 if ! systemctl is-active -q escrow-boot 2>/dev/null; then rm -f /root/boot.token /root/boot.py /root/boot.sh; fi
