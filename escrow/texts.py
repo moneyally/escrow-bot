@@ -105,10 +105,18 @@ def no_room(code: str) -> str:
             "상대에게도 같은 메시지가 갑니다.")
 
 
-def notice(code: str, a: str, b: str, fee: int, minimum: int, support: str, bot_username: str = "") -> str:
+def fee_rule(fee: int, bp: int = 0, cap: int = 0) -> str:
+    if bp <= 0:
+        return f"거래당 {fmt(fee)} USDT"
+    pct = f"{bp / 100:g}%"
+    return f"예치 합계의 {pct} (최소 {fmt(fee)}" + (f" · 최대 {fmt(cap)}" if cap else "") + " USDT)"
+
+
+def notice(code: str, a: str, b: str, fee: int, minimum: int, support: str, bot_username: str = "", fee_bp: int = 0,
+           fee_cap: int = 0) -> str:
     official = f"· 공식 봇은 @{esc(bot_username)} 하나뿐이에요. 이름이 비슷한 봇·계정은 사칭입니다.\n" if bot_username else ""
     return (f"<b>공지</b>\n{LINE}\n거래코드: <code>{code}</code>\n{a} · {b}\n{LINE}\n\n"
-            f"· 수수료는 거래당 {fmt(fee)} USDT, 받는 금액에서 빠져요.\n"
+            f"· 수수료는 {fee_rule(fee, fee_bp, fee_cap)}, 받는 금액에서 빠져요.\n"
             f"· 예치할 땐 한 사람당 최소 {fmt(minimum)} USDT.\n"
             "· 입금 주소와 정확한 금액은 봇 1:1 로만 보냅니다. 여기 올라온 주소로는 보내지 마세요.\n"
             "· 물건이나 작업을 확인한 뒤에만 [거래완료].\n"

@@ -30,7 +30,9 @@ MONEY_HELD = ("received", "confirmed")
 DUST_MICRO = 1 * 1_000_000      # 1 USDT 미만 + 맞는 거래 없음 = 먼지·주소 사칭 tx → 기록만, 알림 X
 
 DEFAULTS = {
-    "fee_micro": 20 * MICRO,
+    "fee_micro": 20 * MICRO,      # 고정 수수료 (비율 방식이면 최소 수수료)
+    "fee_percent_bp": 0,          # 0 = 고정. 예: 150 = 예치 합계의 1.5%
+    "fee_max_micro": 0,           # 비율 방식 최대 (0 = 없음)
     "min_micro": 50 * MICRO,
     "refund_fee_micro": 0,
     "stage_minutes": 30,
@@ -256,9 +258,10 @@ async def create_deal(c, ctx: Ctx, creator: int, partner: int | None, partner_hi
         raise Refused(T.PARTNER_SELF)
     code = await _new_code(c)
     deal = await c.fetchrow(
-        "INSERT INTO deals(code, state, creator, partner, partner_hint, fee_micro, deadline) "
-        "VALUES($1,'INVITED',$2,$3,$4,$5,$6) RETURNING *",
-        code, creator, partner, partner_hint, int(st["fee_micro"]), now() + timedelta(minutes=int(st["stage_minutes"])))
+        "INSERT INTO deals(code, state, creator, partner, partner_hint, fee_micro, deadline, fee_bp, fee_max_micro) "
+        "VALUES($1,'INVITED',$2,$3,$4,$5,$6,$7,$8) RETURNING *",
+        code, creator, partner, partner_hint, int(st["fee_micro"]), now() + timedelta(minutes=int(st["stage_minutes"])),
+        int(st["fee_percent_bp"]), int(st["fee_max_micro"]))
     await c.execute("INSERT INTO deal_parties(deal_id, tg_id, role) VALUES($1,$2,'creator')", deal["id"], creator)
     await event(c, deal["id"], creator, "create", {"partner": partner, "hint": partner_hint})
     if partner:
@@ -352,7 +355,8 @@ async def _enter_notice(c, ctx: Ctx, d, actor):
     st = await settings(c)
     d = await _set_state(c, d, "NOTICE", actor, int(st["stage_minutes"]))
     await say_deal(c, d, T.notice(d["code"], await label(c, d["creator"]), await label(c, d["partner"]),
-                                  d["fee_micro"], int(st["min_micro"]), ctx.cfg.support, ctx.cfg.bot_username), kb_notice(d["id"]))
+                                  d["fee_micro"], int(st["min_micro"]), ctx.cfg.support, ctx.cfg.bot_username,
+                                  d["fee_bp"], d["fee_max_micro"]), kb_notice(d["id"]))
     return d
 
 
@@ -559,7 +563,20 @@ async def _maybe_funded(c, ctx: Ctx, d, actor: int):
         await _ask_approval(c, ctx, d, "start", d["id"], f"양쪽 예치 끝, 합계 {fmt(total)} USDT")
 
 
+def deal_fee(base: int, bp: int, cap: int, total: int) -> int:
+    """비율 방식이면 예치 합계 × bp/10000 (최소 base, 최대 cap). 고정이면 base."""
+    if bp <= 0:
+        return base
+    fee = max(base, total * bp // 10_000)
+    return min(fee, cap) if cap > 0 else fee
+
+
 async def _start(c, ctx: Ctx, d, actor: int):
+    if d["fee_bp"]:      # 비율 수수료는 예치 합계가 정해지는 지금 확정
+        base = await c.fetchval("SELECT coalesce(sum(base_micro),0) FROM deposit_slots WHERE deal_id=$1 AND status='confirmed'", d["id"])
+        fee = deal_fee(int(d["fee_micro"]), int(d["fee_bp"]), int(d["fee_max_micro"]), int(base))   # 끝자리(0.0001…) 빼고 계산
+        await c.execute("UPDATE deals SET fee_micro=$2 WHERE id=$1", d["id"], fee)
+        await event(c, d["id"], actor, "fee_fixed", {"fee": fee})
     d = await _set_state(c, d, "FUNDED", actor)
     bal = await balances(c, d["id"])
     rows = [(await label(c, p), v) for p, v in bal.items()]
@@ -1309,7 +1326,7 @@ async def screen(c, ctx: Ctx, d):
     code, s = d["code"], d["state"]
     if s == "NOTICE":
         return (T.notice(code, await label(c, d["creator"]), await label(c, d["partner"]), d["fee_micro"], int(st["min_micro"]),
-                         ctx.cfg.support, ctx.cfg.bot_username), kb_notice(d["id"]))
+                         ctx.cfg.support, ctx.cfg.bot_username, d["fee_bp"], d["fee_max_micro"]), kb_notice(d["id"]))
     if s == "CHOOSE":
         rows = await c.fetch("SELECT tg_id, choice FROM deal_parties WHERE deal_id=$1 ORDER BY role", d["id"])
         return T.choose(code, [(await label(c, r["tg_id"]), r["choice"]) for r in rows]), kb_choose(d["id"])

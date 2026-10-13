@@ -292,3 +292,15 @@ async def test_d7_check_and_d9_receipt(users, ctx):
     await _send_all(db, ctx, d["id"])
     rec = [r["text"] for r in await db.fetch("SELECT text FROM outbox WHERE chat_id=$1 AND text LIKE '%영수증%'", B)]
     assert rec and "받은 돈" in rec[0] and "tronscan" in rec[0]
+
+
+async def test_d10_percent_fee_is_fixed_at_start(users, ctx):
+    db = users
+    async with db.tx() as c:
+        await core.set_setting(c, "fee_percent_bp", 150, ADMIN)          # 1.5%
+        await core.set_setting(c, "fee_max_micro", 30 * U, ADMIN)
+    d, _ = await to_funded(db, ctx, 1000 * U, 0)
+    assert (await db.fetchval("SELECT fee_micro FROM deals WHERE id=$1", d["id"])) == 20 * U        # 15 < 최소 20
+    d2, _ = await to_funded(db, ctx, 1800 * U, 0)
+    assert (await db.fetchval("SELECT fee_micro FROM deals WHERE id=$1", d2["id"])) == 27 * U       # 1800×1.5% = 27
+    assert core.deal_fee(20 * U, 150, 30 * U, 5000 * U) == 30 * U                                     # 최대

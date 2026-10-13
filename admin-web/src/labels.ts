@@ -9,7 +9,7 @@ export const STATE: Record<string, string> = {
 export const PAYOUT_KIND: Record<string, string> = { partial: "부분 지급", final: "정산", refund: "환불" };
 export const SETTING_LABEL: Record<string, string> = {
   "mode.deposit": "입금 인정", "mode.start": "거래 시작", "mode.partial": "부분 지급", "mode.final": "최종 정산",
-  "mode.refund": "환불", "mode.payout_done": "송금 완료 확인", fee_micro: "수수료", min_micro: "최소 예치",
+  "mode.refund": "환불", "mode.payout_done": "송금 완료 확인", fee_micro: "수수료 (비율 방식이면 최소)", fee_percent_bp: "수수료 비율 (150 = 1.5%, 0 = 고정)", fee_max_micro: "수수료 최대 (0 = 없음)", min_micro: "최소 예치",
   refund_fee_micro: "환불 수수료", auto_max_micro: "자동 상한 (0 = 없음)", stage_minutes: "단계 시간 (분)",
   slot_minutes: "입금 안내 시간 (분)", slot_grace_minutes: "늦은 입금 허용 (분)", new_deals: "새 거래 받기",
 };

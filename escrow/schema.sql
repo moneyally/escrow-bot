@@ -212,3 +212,6 @@ CREATE TABLE IF NOT EXISTS admin_logins (
 
 -- 2차: 봇과 1:1 을 연 적 있는 사람 (봇이 먼저 1:1 을 보낼 수 있음)
 ALTER TABLE users ADD COLUMN IF NOT EXISTS dm_ok BOOLEAN NOT NULL DEFAULT FALSE;
+-- 수수료 방식 (거래 만들 때 설정을 그대로 저장 — 중간에 설정이 바뀌어도 그 거래는 그대로)
+ALTER TABLE deals ADD COLUMN IF NOT EXISTS fee_bp INT NOT NULL DEFAULT 0;
+ALTER TABLE deals ADD COLUMN IF NOT EXISTS fee_max_micro BIGINT NOT NULL DEFAULT 0;
