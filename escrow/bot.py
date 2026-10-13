@@ -782,7 +782,8 @@ async def _room_create(context, row):
             raise RuntimeError("도우미 계정이 연결돼 있지 않아요")
         h: helper.Helper = context.application.bot_data.setdefault("helper", helper.Helper())
         bot_user = context.application.bot_data.get("bot_username") or cfg.bot_username
-        chat_id = await h.create_room(data, title, bot_user, sorted(ctx.admins))
+        others = sorted(a for a in ctx.admins if a != data.get("user_id"))     # 도우미가 곧 관리자 계정이면 이미 방장
+        chat_id = await h.create_room(data, title, bot_user, others)
         data["rooms_made"] = int(data.get("rooms_made", 0)) + 1
         await helper.save(db, data)
     except Exception as e:   # noqa: BLE001 — 텔레그램 제한·로그인 풀림 등
