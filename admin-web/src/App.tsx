@@ -10,13 +10,14 @@ import { Users } from "./views/Users";
 import { Rooms } from "./views/Rooms";
 import { Settings } from "./views/Settings";
 import { Audit } from "./views/Audit";
+import { Proxy } from "./views/Proxy";
 
 export type Nav = { go: (tab: string) => void; openDeal: (code: string) => void; refresh: () => void };
 
 const TABS: [string, string, keyof Stats | null][] = [
   ["dash", "대시보드", null], ["approvals", "확인 대기", "pending_approvals"], ["payouts", "보낼 것", "payouts_to_send"],
   ["deals", "거래", null], ["deposits", "입금 확인", "unmatched_in"], ["disputes", "분쟁", "disputes"],
-  ["users", "사용자", null], ["rooms", "거래방", null], ["settings", "설정", null], ["audit", "기록", null],
+  ["proxy", "수동 중개", null], ["users", "사용자", null], ["rooms", "거래방", null], ["settings", "설정", null], ["audit", "기록", null],
 ];
 const LIVE = new Set(["dash", "approvals", "payouts", "deposits"]);   // 15초마다 새로고침하는 탭
 
@@ -35,6 +36,7 @@ function Shell() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [authed, setAuthed] = useState<boolean | null>(null);
   const [tick, setTick] = useState(0);
+  const [proxyOn, setProxyOn] = useState(false);
 
   useEffect(() => {
     const h = () => setLoc(readHash());
@@ -44,6 +46,7 @@ function Shell() {
 
   const refresh = useCallback(() => setTick((t) => t + 1), []);
   useEffect(() => {
+    api<{ enabled: boolean }>("/api/proxy").then((p) => setProxyOn(p.enabled)).catch(() => {});
     api<Stats>("/api/stats").then((s) => { setStats(s); setAuthed(true); })
       .catch((e) => { if (e instanceof Unauthorized) setAuthed(false); else if (e instanceof ApiError) ui.toast(e.message); });
   }, [tick, tab, code, ui]);
@@ -69,7 +72,7 @@ function Shell() {
       <aside className="sidebar" aria-label="메뉴">
         <div className="brand">에스크로 관리</div>
         <nav>
-          {TABS.map(([k, label, key]) => {
+          {TABS.filter(([k]) => k !== "proxy" || proxyOn).map(([k, label, key]) => {
             const n = key && stats ? (stats[key] as number) : 0;
             return (
               <a key={k} href={`#${k}`} className={k === tab ? "on" : ""} aria-current={k === tab ? "page" : undefined}>
@@ -100,6 +103,7 @@ function View({ tab, stats, nav, tick }: { tab: string; stats: Stats | null; nav
     case "disputes": return <Deals nav={nav} fixedState="DISPUTE" />;
     case "deposits": return <Deposits nav={nav} tick={tick} />;
     case "users": return <Users nav={nav} />;
+    case "proxy": return <Proxy nav={nav} tick={tick} />;
     case "rooms": return <Rooms nav={nav} tick={tick} />;
     case "settings": return <Settings nav={nav} />;
     case "audit": return <Audit />;

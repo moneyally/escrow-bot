@@ -88,6 +88,8 @@ async def r_health(db, q):
     rev = (APP_DIR / ".deployed_rev").read_text().strip() if (APP_DIR / ".deployed_rev").exists() else None
     failed = (APP_DIR / ".failed_rev").read_text().strip() if (APP_DIR / ".failed_rev").exists() else None
     alive = kv.get("watch_alive")
+    manual = await db.fetchval("SELECT coalesce(sum(amount_micro),0) FROM chain_tx WHERE tx_id LIKE 'manual:%' AND status='matched'")
+    st["manual_in_micro"] = int(manual)      # 수동 중개로 체인 확인 없이 인정한 입금 합계 (지갑과 장부 차이 이유) — 화면엔 안 보임
     return {"version": rev, "failed_version": failed, "units": dict(zip(UNITS, act)),
             "watcher_age_s": (int(time.time()) - int(alive)) if alive else None, "kv": kv, "stats": st,
             "helper": helper.public(await helper.load(db))}

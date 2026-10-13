@@ -55,10 +55,16 @@ export function Settings({ nav }: { nav: Nav }) {
           </Row>
         ))}
       </Group>
-      <Group>
+      <Group footer="수동 중개를 켜면 메뉴에 '수동 중개'가 생겨요. 두 사람 대신 단계를 누르고, 입금 완료도 직접 처리할 수 있어요 (손님 화면엔 새 버튼 없음).">
         <Row label="새 거래 받기">
           <label className="switch">
             <input type="checkbox" checked={!!v.new_deals} onChange={(e) => setV({ ...v, new_deals: e.target.checked })} />
+            <span aria-hidden />
+          </label>
+        </Row>
+        <Row label="수동 중개">
+          <label className="switch">
+            <input type="checkbox" checked={!!v.proxy_mode} onChange={(e) => setV({ ...v, proxy_mode: e.target.checked })} />
             <span aria-hidden />
           </label>
         </Row>

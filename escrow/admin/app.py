@@ -19,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .. import config as cfgmod
-from .. import core, helper
+from .. import core, helper, proxy
 from . import diag
 from ..db import DB
 from ..money import fmt, fmt_exact, parse_usdt
@@ -56,6 +56,17 @@ class Done(BaseModel):
 class Ban(BaseModel):
     banned: bool
 
+class ProxyNew(BaseModel):
+    a: str
+    b: str
+    reason: str = ""
+
+class ProxyAct(BaseModel):
+    action: str
+    as_tg: int | None = None
+    value: object = None
+    reason: str = ""
+
 class HelperStart(BaseModel):
     api_id: int
     api_hash: str
@@ -64,6 +75,17 @@ class HelperStart(BaseModel):
 class HelperCode(BaseModel):
     code: str
     password: str = ""
+
+
+def hide_manual(v):
+    """수동 중개 입금 흔적(tx 'manual:…')은 관리 화면에 안 보이게 (원격 점검·DB 에만)."""
+    if isinstance(v, str):
+        return "-" if v.startswith("manual:") else v
+    if isinstance(v, dict):
+        return {k: hide_manual(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [hide_manual(x) for x in v]
+    return v
 
 
 def _sign(secret: str, payload: str) -> str:
@@ -261,7 +283,7 @@ def create_app(cfg=None, database: DB | None = None) -> FastAPI:
         finally:
             await db().pool.release(con)
         conv = lambda rows: [{k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in dict(r).items()} for r in rows]  # noqa: E731
-        return {
+        return hide_manual({
             "deal": conv([d])[0],
             "parties": conv(parties),
             "balances": {str(k): fmt(v) for k, v in bal.items()},
@@ -272,7 +294,7 @@ def create_app(cfg=None, database: DB | None = None) -> FastAPI:
             "messages": conv(await db().fetch("SELECT m.*, u.username FROM deal_messages m LEFT JOIN users u ON u.tg_id=m.tg_id "
                                               "WHERE deal_id=$1 ORDER BY m.id LIMIT 2000", d["id"])),
             "ratings": conv(await db().fetch("SELECT * FROM ratings WHERE deal_id=$1 ORDER BY id", d["id"])),
-        }
+        })
 
 
     @app.post("/api/deals/{code}/cancel")
@@ -308,7 +330,7 @@ def create_app(cfg=None, database: DB | None = None) -> FastAPI:
         if status == "unmatched":
             rows = await db().fetch("SELECT * FROM chain_tx WHERE direction='in' AND status IN ('unmatched','flagged') ORDER BY block_ts DESC")
         else:
-            rows = await db().fetch("SELECT * FROM chain_tx ORDER BY block_ts DESC LIMIT 300")
+            rows = await db().fetch("SELECT * FROM chain_tx WHERE tx_id NOT LIKE 'manual:%' ORDER BY block_ts DESC LIMIT 300")
         return [{**{k: v for k, v in dict(r).items() if k not in ("block_ts", "created_at")}, "amount": fmt(r["amount_micro"]),
                  "block_ts": r["block_ts"].isoformat()} for r in rows]
 
@@ -466,6 +488,54 @@ def create_app(cfg=None, database: DB | None = None) -> FastAPI:
             raise HTTPException(400, str(e))
         return {"result": "저장했어요."}
 
+    # ── 수동 중개 (설정 proxy_mode 가 켜져 있을 때만) ──
+    async def _proxy_on(c):
+        if not await proxy.enabled(c):
+            raise HTTPException(403, "수동 중개가 꺼져 있어요 (설정에서 켜기)")
+
+    async def _who(c, key: str) -> int:
+        k = key.strip().lstrip("@")
+        tg = await c.fetchval("SELECT tg_id FROM users WHERE tg_id::text=$1 OR lower(username)=lower($1) ORDER BY updated_at DESC LIMIT 1", k)
+        if not tg:
+            raise HTTPException(400, f"{key}: 봇을 쓴 적 없는 사람이에요 (먼저 봇에 /start)")
+        return tg
+
+    @app.get("/api/proxy")
+    async def proxy_board(_: int = Depends(admin)):
+        async with db().tx() as c:
+            on = await proxy.enabled(c)
+            return {"enabled": on, "deals": await proxy.board(c) if on else []}
+
+    @app.post("/api/proxy/new")
+    async def proxy_new(body: ProxyNew, tg: int = Depends(admin)):
+        try:
+            async with db().tx() as c:
+                await _proxy_on(c)
+                d = await proxy.new_deal(c, ctx, tg, await _who(c, body.a), await _who(c, body.b), body.reason)
+        except core.Refused as e:
+            raise HTTPException(400, str(e))
+        return {"result": f"거래 {d['code']} 를 만들고 상대 수락까지 했어요.", "code": d["code"]}
+
+    @app.post("/api/proxy/{deal_id}/act")
+    async def proxy_act(deal_id: int, body: ProxyAct, tg: int = Depends(admin)):
+        value = body.value
+        if body.action in ("amount", "deposit") and value not in (None, ""):
+            value = parse_usdt(str(value))
+            if value is None:
+                raise HTTPException(400, "금액을 숫자로 넣어주세요.")
+        if body.action == "split" and isinstance(value, dict) and value.get("a") not in (None, ""):
+            a_amt = parse_usdt(str(value["a"]))
+            if a_amt is None:
+                raise HTTPException(400, "직접 입력 금액을 숫자로 넣어주세요.")
+            value = {**value, "a": a_amt}
+        try:
+            async with db().tx() as c:
+                await _proxy_on(c)
+                await proxy.act(c, ctx, tg, deal_id, body.action, body.as_tg, value, body.reason)
+        except core.Refused as e:
+            raise HTTPException(400, str(e))
+        return {"result": "처리했어요."}
+
     # ── 도우미 계정 (거래방 자동 생성) ──
     logins: dict[int, helper.Login] = {}
 
@@ -517,7 +587,7 @@ def create_app(cfg=None, database: DB | None = None) -> FastAPI:
             rows = await db().fetch("SELECT * FROM events WHERE deal_id=$1 ORDER BY id DESC LIMIT 500", d["id"])
         else:
             rows = await db().fetch("SELECT * FROM events ORDER BY id DESC LIMIT 500")
-        return [{"id": r["id"], "deal_id": r["deal_id"], "actor": r["actor"], "kind": r["kind"], "data": r["data"],
+        return [{"id": r["id"], "deal_id": r["deal_id"], "actor": r["actor"], "kind": r["kind"], "data": hide_manual(r["data"]),
                  "at": r["at"].isoformat()} for r in rows]
 
     app.include_router(diag.router(db))        # 🔌 읽기 전용 원격 점검 (토큰은 봇 /diag)

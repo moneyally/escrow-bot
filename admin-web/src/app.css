@@ -266,3 +266,19 @@ tbody tr:hover td { background: var(--fill-quaternary); }
 .msg.right img { margin-left: auto; }
 .msg .file { font-size: var(--text-footnote); }
 @media (max-width: 743px) { .bars { gap: 2px; height: 110px; } .msg { max-width: 92%; } }
+
+/* ── 수동 중개 표 ── */
+.board-title { display: inline-flex; gap: var(--space-2); align-items: center; flex-wrap: wrap; text-transform: none; }
+table.board { table-layout: fixed; }
+table.board th { font-size: var(--text-footnote); }
+table.board td { vertical-align: middle; padding-top: var(--space-2); padding-bottom: var(--space-2); }
+table.board td.step { color: var(--label-secondary); white-space: nowrap; width: 110px; }
+.cell-ok { color: color-mix(in srgb, var(--system-green) 80%, var(--label-primary)); font-weight: 500; }
+.cell-wait { color: var(--label-tertiary); }
+.cell-pair { display: inline-flex; gap: var(--space-1-5); flex-wrap: wrap; }
+.cell-btn { min-height: 32px; padding: 0 var(--space-3); border-radius: var(--radius-full); font-size: var(--text-footnote); font-weight: 600;
+  transition: transform var(--duration-faster) var(--ease-default); }
+.cell-btn:active { transform: scale(.97); }
+.cell-btn.secondary { background: var(--tint-soft); color: var(--tint); }
+.cell-btn.primary { background: var(--tint); color: #fff; }
+.pad-x { padding: 0 var(--space-4) var(--space-3); }

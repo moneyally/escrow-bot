@@ -41,6 +41,7 @@ DEFAULTS = {
     "slot_grace_minutes": 10,     # 안내한 시간보다 조금 늦게 확정돼도 인정
     "auto_max_micro": 0,          # 자동 모드라도 이 금액을 넘으면 수동 (0 = 제한 없음)
     "new_deals": True,            # False 면 새 거래 안 받음
+    "proxy_mode": False,          # 수동 중개: 관리 페이지에서 두 사람 대신 단계를 누를 수 있음 (escrow/proxy.py)
     "mode.deposit": "manual",
     "mode.start": "manual",
     "mode.partial": "manual",
