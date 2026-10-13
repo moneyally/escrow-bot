@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .. import config as cfgmod
-from .. import core
+from .. import core, helper
 from ..db import DB
 from ..money import fmt, fmt_exact, parse_usdt
 
@@ -53,6 +53,15 @@ class Done(BaseModel):
 
 class Ban(BaseModel):
     banned: bool
+
+class HelperStart(BaseModel):
+    api_id: int
+    api_hash: str
+    phone: str
+
+class HelperCode(BaseModel):
+    code: str
+    password: str = ""
 
 
 def _sign(secret: str, payload: str) -> str:
@@ -397,6 +406,49 @@ def create_app(cfg=None, database: DB | None = None) -> FastAPI:
         except (core.Refused, ValueError, TypeError) as e:
             raise HTTPException(400, str(e))
         return {"result": "저장했어요."}
+
+    # ── 도우미 계정 (거래방 자동 생성) ──
+    logins: dict[int, helper.Login] = {}
+
+    @app.get("/api/helper")
+    async def helper_get(_: int = Depends(admin)):
+        return helper.public(await helper.load(db()))
+
+    @app.post("/api/helper/start")
+    async def helper_start(body: HelperStart, tg: int = Depends(admin)):
+        phone = "+" + "".join(ch for ch in body.phone if ch.isdigit())
+        if len(phone) < 9 or len(body.api_hash.strip()) != 32:
+            raise HTTPException(400, "전화번호(국가번호 포함)와 api_hash(32자)를 확인해주세요.")
+        lg = helper.Login(body.api_id, body.api_hash.strip(), phone)
+        try:
+            await lg.send_code()
+        except Exception as e:   # noqa: BLE001
+            raise HTTPException(400, f"코드 요청 실패: {type(e).__name__}")
+        logins[tg] = lg
+        await core.event(db(), None, tg, "helper_code_sent", {"phone": phone[:4] + "****" + phone[-2:]})
+        return {"result": "텔레그램 앱으로 로그인 코드를 보냈어요. 그 코드를 입력하세요."}
+
+    @app.post("/api/helper/code")
+    async def helper_code(body: HelperCode, tg: int = Depends(admin)):
+        lg = logins.get(tg)
+        if not lg:
+            raise HTTPException(400, "먼저 코드 받기를 해주세요.")
+        try:
+            data = await lg.finish(body.code.strip().replace(" ", ""), body.password)
+        except helper.PasswordNeeded:
+            raise HTTPException(400, "2단계 인증 비밀번호가 필요해요. 비밀번호 칸을 채워서 다시 눌러주세요.")
+        except Exception as e:   # noqa: BLE001
+            raise HTTPException(400, f"로그인 실패: {type(e).__name__}")
+        logins.pop(tg, None)
+        await helper.save(db(), data)
+        await core.event(db(), None, tg, "helper_connected", {"user_id": data["user_id"]})
+        return {"result": f"도우미 계정 연결됨: {data['name']}. 이제 빈 방이 없으면 자동으로 거래방을 만들어요."}
+
+    @app.post("/api/helper/logout")
+    async def helper_logout(tg: int = Depends(admin)):
+        await db().execute("DELETE FROM kv WHERE key=$1", helper.KV_KEY)
+        await core.event(db(), None, tg, "helper_removed", {})
+        return {"result": "도우미 계정 연결을 끊었어요."}
 
     # ── 기록 ──
     @app.get("/api/audit")

@@ -20,7 +20,7 @@ from telegram.ext import (Application, CallbackQueryHandler, ChatJoinRequestHand
                           ContextTypes, MessageHandler, TypeHandler, filters)
 
 from . import config as cfgmod
-from . import core, mock
+from . import core, helper, mock
 from . import texts as T
 from .db import DB
 from .money import MICRO, fmt, parse_usdt
@@ -676,6 +676,9 @@ async def on_my_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if await c.fetchval("SELECT 1 FROM rooms WHERE chat_id=$1", chat.id):
                 await core.room_broken(c, ctx, chat.id, "봇이 방에서 나가짐")
         return
+    hdata = await helper.load(db)
+    if hdata and cm.from_user.id == hdata.get("user_id"):
+        return
     if cm.from_user.id not in ctx.admins:
         try:
             await context.bot.leave_chat(chat.id)
@@ -722,6 +725,30 @@ async def _room_open(context, row):
     await db.execute("UPDATE rooms SET invite_link=$2, updated_at=now() WHERE chat_id=$1", chat_id, link.invite_link)
     for p in (deal["creator"], deal["partner"]):
         await send(context, p, T.room_link(deal["code"], link.invite_link))
+
+
+async def _room_create(context, row):
+    """빈 방이 없을 때 도우미 계정으로 새 거래방. 실패하면 1:1 로."""
+    db, ctx, cfg = svc(context)
+    deal_id = row["payload"]["deal_id"]
+    code = await db.fetchval("SELECT code FROM deals WHERE id=$1", deal_id)
+    data = await helper.load(db)
+    title = f"{cfg.bot_name} 거래방"
+    try:
+        if not data:
+            raise RuntimeError("도우미 계정이 연결돼 있지 않아요")
+        h: helper.Helper = context.application.bot_data.setdefault("helper", helper.Helper())
+        bot_user = context.application.bot_data.get("bot_username") or cfg.bot_username
+        chat_id = await h.create_room(data, title, bot_user, sorted(ctx.admins))
+        data["rooms_made"] = int(data.get("rooms_made", 0)) + 1
+        await helper.save(db, data)
+    except Exception as e:   # noqa: BLE001 — 텔레그램 제한·로그인 풀림 등
+        log.warning("방 만들기 실패 %s: %r", code, e)
+        async with db.tx() as c:
+            await core.room_create_failed(c, ctx, deal_id, f"{type(e).__name__}: {e}")
+        return
+    async with db.tx() as c:
+        await core.room_created(c, ctx, deal_id, chat_id, title)
 
 
 async def _room_close(context, row):
@@ -775,6 +802,8 @@ async def outbox_job(context: ContextTypes.DEFAULT_TYPE):
                 await _room_open(context, row)
             elif row["kind"] == "room_close":
                 await _room_close(context, row)
+            elif row["kind"] == "room_create":
+                await _room_create(context, row)
             await db.execute("UPDATE outbox SET sent_at=now(), attempts=attempts+1, message_id=$2 WHERE id=$1", row["id"], message_id)
         except RetryAfter as e:
             blocked.add(chat)
@@ -931,6 +960,8 @@ async def post_shutdown(app: Application):
         await app.bot_data["db"].close()
     if "tron" in app.bot_data:
         await app.bot_data["tron"].close()
+    if "helper" in app.bot_data:
+        await app.bot_data["helper"].close()
 
 
 def build(cfg) -> Application:

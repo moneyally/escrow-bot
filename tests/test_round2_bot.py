@@ -193,3 +193,57 @@ async def test_u6_partner_without_username_via_confirmed_link(users):
     assert any("거래 요청" in t for t in env.bot.texts(B))
     await env.press(B, env.last_button(B, "d:acc"))
     assert (await db.fetchval("SELECT state FROM deals WHERE id=$1", d["id"])) != "INVITED"
+
+
+class FakeHelper:
+    def __init__(self, fail=False):
+        self.fail, self.made = fail, []
+
+    async def create_room(self, data, title, bot_username, admin_ids):
+        if self.fail:
+            raise RuntimeError("FloodWait")
+        self.made.append((title, bot_username, admin_ids))
+        return -1009990000 - len(self.made)
+
+    async def close(self):
+        pass
+
+
+async def _invite_accept(env, db):
+    for who in (A, B):
+        await env.start(who)
+        await env.press(who, "t:skip")
+    await env.press(A, "menu:new")
+    await env.text(A, "@bobby")
+    await env.press(B, env.last_button(B, "d:acc"))
+    return await db.fetchrow("SELECT * FROM deals ORDER BY id DESC LIMIT 1")
+
+
+async def test_helper_creates_room_when_pool_empty(users):
+    db = users
+    env = Env(db)
+    await db.execute("INSERT INTO kv(key, value) VALUES('helper', $1)", {"session": "x", "api_id": 1, "api_hash": "h", "user_id": 42})
+    env.app.bot_data["helper"] = fh = FakeHelper()
+    d = await _invite_accept(env, db)
+    d = await db.fetchrow("SELECT * FROM deals WHERE id=$1", d["id"])
+    assert d["state"] == "ROOM" and d["room_id"] == -1009990001
+    assert fh.made[0][1] == "testescrowbot" and fh.made[0][2] == [ADMIN]
+    assert (await db.fetchval("SELECT state FROM rooms WHERE chat_id=-1009990001")) == "used"
+    assert any("room-1009990001" in t for t in env.bot.texts(A)), "입장 링크가 안 감"
+    for who in (A, B):
+        async with db.tx() as c:
+            assert await core.room_joined(c, env.app.bot_data["ctx"], -1009990001, who)
+    await env.flush()
+    assert "공지" in env.bot.texts(-1009990001)[-1]
+
+
+async def test_helper_failure_falls_back_to_dm(users):
+    db = users
+    env = Env(db)
+    await db.execute("INSERT INTO kv(key, value) VALUES('helper', $1)", {"session": "x", "api_id": 1, "api_hash": "h", "user_id": 42})
+    env.app.bot_data["helper"] = FakeHelper(fail=True)
+    d = await _invite_accept(env, db)
+    d = await db.fetchrow("SELECT * FROM deals WHERE id=$1", d["id"])
+    assert d["state"] == "NOTICE" and d["room_id"] is None
+    assert any("자동 생성 실패" in t for t in env.bot.texts(ADMIN))
+    assert any(b.startswith("d:ntc") for b in env.bot.buttons(A))

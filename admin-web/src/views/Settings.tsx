@@ -3,6 +3,7 @@ import { api, ApiError, put } from "../api";
 import type { Nav } from "../App";
 import { Button, Group, Row, useUi } from "../ui";
 import { SETTING_LABEL } from "../labels";
+import { HelperSettings } from "./Helper";
 
 type V = Record<string, string | number | boolean>;
 
@@ -63,6 +64,8 @@ export function Settings({ nav }: { nav: Nav }) {
         </Row>
       </Group>
       <div className="actions"><Button onClick={save}>저장</Button></div>
+      <div style={{ height: 24 }} />
+      <HelperSettings />
     </>
   );
 }

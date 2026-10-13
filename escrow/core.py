@@ -357,14 +357,44 @@ async def answer_invite(c, ctx: Ctx, deal_id: int, tg_id: int, accept: bool):
         d = await _set_state(c, d, "ROOM", tg_id, int(st["stage_minutes"]), room_id=room["chat_id"])
         await task(c, "room_open", {"deal_id": d["id"]}, room["chat_id"], d["id"])
         free = await c.fetchval("SELECT count(*) FROM rooms WHERE state='free'")
-        if free <= 5:
+        if free <= 5 and not await c.fetchval("SELECT 1 FROM kv WHERE key='helper' AND value ? 'session'"):
             await say_admins(c, ctx, f"빈 거래방이 {free}개 남았어요. 방을 더 만들어 봇을 관리자로 넣어주세요.")
+    elif await c.fetchval("SELECT 1 FROM kv WHERE key='helper' AND value ? 'session'"):
+        # 빈 방이 없으면 도우미 계정이 새로 만듦 (봇 프로세스의 outbox 가 처리 → room_created / room_create_failed)
+        d = await _set_state(c, d, "ROOM", tg_id, int(st["stage_minutes"]))
+        await task(c, "room_create", {"deal_id": d["id"]}, None, d["id"])
+        for p in (d["creator"], d["partner"]):
+            await say(c, p, T.room_making(d["code"]), deal_id=d["id"])
     else:
         await say_admins(c, ctx, f"빈 거래방이 없어서 <code>{d['code']}</code> 는 1:1 로 진행해요.")
         for p in (d["creator"], d["partner"]):
             await say(c, p, T.no_room(d["code"]), deal_id=d["id"])
         d = await _enter_notice(c, ctx, d, tg_id)
     return d
+
+
+async def room_created(c, ctx: Ctx, deal_id: int, chat_id: int, title: str):
+    """도우미가 만든 방 → 그 거래에 붙이고 링크 보내기. 그 사이 거래가 끝났으면 방은 빈 방으로."""
+    d = await _lock(c, deal_id)
+    ok = d["state"] == "ROOM" and not d["room_id"]
+    await c.execute("INSERT INTO rooms(chat_id, title, state, deal_id, note) VALUES($1,$2,$3,$4,'도우미가 만듦') "
+                    "ON CONFLICT (chat_id) DO UPDATE SET state=EXCLUDED.state, deal_id=EXCLUDED.deal_id, title=EXCLUDED.title, "
+                    "updated_at=now()", chat_id, title[:100], "used" if ok else "free", deal_id if ok else None)
+    await event(c, deal_id, 0, "room_created", {"chat": chat_id, "used": ok})
+    if ok:
+        await c.execute("UPDATE deals SET room_id=$2, updated_at=now() WHERE id=$1", deal_id, chat_id)
+        await task(c, "room_open", {"deal_id": deal_id}, chat_id, deal_id)
+
+
+async def room_create_failed(c, ctx: Ctx, deal_id: int, note: str):
+    """도우미가 방을 못 만듦 → 1:1 로 이어감 + 관리자 알림."""
+    d = await _lock(c, deal_id)
+    await say_admins(c, ctx, f"⚠️ 거래방 자동 생성 실패: {T.esc(note)[:200]}\n<code>{d['code']}</code> 는 1:1 로 진행해요.")
+    if d["state"] != "ROOM" or d["room_id"]:
+        return
+    for p in (d["creator"], d["partner"]):
+        await say(c, p, T.no_room(d["code"]), deal_id=deal_id)
+    await _enter_notice(c, ctx, d, 0)
 
 
 async def room_joined(c, ctx: Ctx, chat_id: int, tg_id: int) -> bool:

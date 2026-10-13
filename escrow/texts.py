@@ -361,3 +361,7 @@ def claim_wait(code: str) -> str:
 
 def claim_rejected(code: str) -> str:
     return f"신청자가 다른 사람이라고 했어요. 이 거래(<code>{code}</code>)에는 참여할 수 없어요."
+
+
+def room_making(code: str) -> str:
+    return f"거래방을 만들고 있어요. 잠시 뒤 입장 링크를 보내드릴게요. (<code>{code}</code>)"
