@@ -39,3 +39,9 @@ async def users(database):
 
 def ts():
     return datetime.now(timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def fixed_offsets(monkeypatch):
+    """끝자리 금액을 1,2,3… 순서로 (실제는 무작위 시작) — 금액을 예측해 검사하려고."""
+    monkeypatch.setattr(core, "_offsets", lambda: list(range(1, core.SLOT_STEPS + 1)))

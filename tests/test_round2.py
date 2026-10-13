@@ -1,0 +1,89 @@
+"""2차 점검(docs: 계획 C·U·O 표) 재현 테스트. 고친 줄을 되돌리면 각 테스트가 실패해야 함."""
+from datetime import timedelta
+
+from conftest import A, ADMIN, B, PAY, ts
+from escrow import core
+from test_core import U, to_choose
+
+
+async def _deposit_stage(db, ctx):
+    """A 만 맡기는 거래를 DEPOSIT 까지."""
+    d = await to_choose(db, ctx)
+    async with db.tx() as c:
+        await core.choose(c, ctx, d["id"], A, True)
+    async with db.tx() as c:
+        await core.choose(c, ctx, d["id"], B, False)
+    return d
+
+
+async def _slot(db, ctx, deal_id, base=100 * U):
+    async with db.tx() as c:
+        return await core.open_slot(c, ctx, deal_id, A, base)
+
+
+async def _age(db, slot_id, minutes):
+    """자리를 minutes 분 전에 만든 것처럼 (안내 시간이 지난 상황 재현)."""
+    await db.execute("UPDATE deposit_slots SET created_at=created_at - $2::interval, expires_at=expires_at - $2::interval, "
+                     "updated_at=updated_at - $2::interval WHERE id=$1", slot_id, timedelta(minutes=minutes))
+
+
+async def test_c1_ended_slot_amount_is_not_reused(users, ctx):
+    """A 거래 자리가 만료된 직후 B 거래가 같은 끝자리 금액을 받으면, A 의 늦은 돈이 B 거래로 잡힌다 → 24시간 재사용 금지."""
+    db = users
+    d1 = await _deposit_stage(db, ctx)
+    s1 = await _slot(db, ctx, d1["id"])
+    await _age(db, s1["id"], 45)                       # 30분 안내 + 10분 여유 지남
+    async with db.tx() as c:
+        await core.expire_due(c, ctx)
+    assert (await db.fetchval("SELECT status FROM deposit_slots WHERE id=$1", s1["id"])) == "expired"
+    d2 = await _deposit_stage(db, ctx)
+    s2 = await _slot(db, ctx, d2["id"])
+    assert s2["amount_micro"] != s1["amount_micro"], "끝난 자리 금액을 바로 다시 줌"
+    # A 가 예전 안내 금액을 이제야 보냄 → d2 로 잡히면 안 됨
+    async with db.tx() as c:
+        r = await core.record_incoming(c, ctx, "late1", 0, "TFromA", PAY, s1["amount_micro"], ts())
+    assert r == "unmatched"
+    assert (await db.fetchval("SELECT status FROM deposit_slots WHERE id=$1", s2["id"])) == "waiting"
+
+
+async def test_c1_payment_before_slot_existed_is_not_matched(users, ctx):
+    """자리가 생기기 전 시각의 입금(다른 사람이 우연히 같은 금액)은 그 자리로 안 잡힘."""
+    db = users
+    d = await _deposit_stage(db, ctx)
+    s = await _slot(db, ctx, d["id"])
+    async with db.tx() as c:
+        r = await core.record_incoming(c, ctx, "early1", 0, "TOther", PAY, s["amount_micro"], ts() - timedelta(minutes=20))
+    assert r == "unmatched"
+
+
+async def test_c3_watcher_lag_still_matches_expired_slot(users, ctx):
+    """감시가 늦어 자리가 먼저 만료돼도, 안내 시간 안에 보낸 돈이면 그 거래로 인정."""
+    db = users
+    d = await _deposit_stage(db, ctx)
+    s = await _slot(db, ctx, d["id"])
+    await _age(db, s["id"], 45)
+    async with db.tx() as c:
+        await core.expire_due(c, ctx)
+    sent_at = ts() - timedelta(minutes=40)              # 안내 시간 안 (만든 지 5분 뒤)
+    async with db.tx() as c:
+        r = await core.record_incoming(c, ctx, "lag1", 0, "TFromA", PAY, s["amount_micro"], sent_at)
+    assert r == "matched"
+    assert (await db.fetchval("SELECT status FROM deposit_slots WHERE id=$1", s["id"])) == "received"
+
+
+async def test_c5_assign_after_watcher_matched_is_refused(users, ctx):
+    """관리자가 '확인 필요' 입금을 자리에 연결하려는 사이 감시가 그 자리를 먼저 잡았으면 → 연결 거부 (돈 한 건이 장부에서 사라지지 않게)."""
+    db = users
+    d = await _deposit_stage(db, ctx)
+    s = await _slot(db, ctx, d["id"])
+    async with db.tx() as c:
+        assert await core.record_incoming(c, ctx, "odd1", 0, "TFromA", PAY, 99 * U, ts()) == "unmatched"
+    async with db.tx() as c:
+        assert await core.record_incoming(c, ctx, "ok1", 0, "TFromA", PAY, s["amount_micro"], ts()) == "matched"
+    try:
+        async with db.tx() as c:
+            await core.assign_deposit(c, ctx, "odd1", 0, s["id"], ADMIN)
+        raise AssertionError("이미 잡힌 자리에 또 연결됨")
+    except core.Refused:
+        pass
+    assert (await db.fetchval("SELECT status FROM chain_tx WHERE tx_id='odd1'")) == "unmatched"

@@ -386,8 +386,20 @@ async def choose(c, ctx: Ctx, deal_id: int, tg_id: int, deposit: bool) -> bool:
 
 
 # ── 입금 ─────────────────────────────────────────────
+SLOT_STEP = 100                    # 0.0001 USDT
+SLOT_STEPS = 999                   # 끝자리 0.0001 ~ 0.0999
+AMOUNT_HOLD = timedelta(hours=24)  # 끝난 자리 금액을 다시 주기 전 쉬는 시간
+CLOCK_SKEW = timedelta(minutes=1)  # 블록 시각 vs 서버 시각 오차 허용
+
+
+def _offsets() -> list[int]:
+    """끝자리 후보 순서: 무작위 시작에서 한 바퀴 (다음 금액을 짐작 못 하게). 테스트는 1,2,3… 로 바꿔 끼움."""
+    start = secrets.randbelow(SLOT_STEPS)
+    return [(start + k) % SLOT_STEPS + 1 for k in range(SLOT_STEPS)]
+
+
 async def open_slot(c, ctx: Ctx, deal_id: int, tg_id: int, base: int):
-    """맡길 금액을 받아 끝자리 금액 자리를 만든다 → (slot). 같은 금액이 기다리는 중이면 0.0001 씩 올림 (최대 100번)."""
+    """맡길 금액을 받아 끝자리 금액 자리를 만든다 → (slot). 끝자리 0.0001~0.0999 중 최근 24시간 안 쓴 것을 무작위 순서로."""
     if not ctx.cfg.can_take_deposits:
         raise Refused(T.DEPOSITS_OFF)
     d = await _lock(c, deal_id)
@@ -406,18 +418,22 @@ async def open_slot(c, ctx: Ctx, deal_id: int, tg_id: int, base: int):
     if old:
         await c.execute("UPDATE deposit_slots SET status='cancelled', updated_at=now() WHERE id=$1", old["id"])
     expires = now() + timedelta(minutes=int(st["slot_minutes"]))
-    step = 100   # 0.0001 USDT
-    for i in range(1, 101):
-        amount = base + i * step
+    # 최근 24시간 안에 쓰인 끝자리 금액은 다시 안 줌 — 끝난 자리로 늦게 온 돈이 새 거래로 잡히지 않게
+    used = {r["amount_micro"] for r in await c.fetch(
+        "SELECT amount_micro FROM deposit_slots WHERE amount_micro BETWEEN $1 AND $2 AND (status='waiting' OR updated_at > now() - $3::interval)",
+        base + SLOT_STEP, base + SLOT_STEPS * SLOT_STEP, AMOUNT_HOLD)}
+    slot = None
+    for i in [k for k in _offsets() if base + k * SLOT_STEP not in used][:20]:
+        amount = base + i * SLOT_STEP
         try:
-            async with c.transaction():      # SAVEPOINT: 겹치면 이 시도만 되돌리고 다음 금액
+            async with c.transaction():      # SAVEPOINT: 동시에 같은 금액을 잡으면 이 시도만 되돌리고 다음 금액
                 slot = await c.fetchrow(
                     "INSERT INTO deposit_slots(deal_id, tg_id, base_micro, amount_micro, status, expires_at) "
                     "VALUES($1,$2,$3,$4,'waiting',$5) RETURNING *", deal_id, tg_id, base, amount, expires)
             break
         except asyncpg.UniqueViolationError:
             continue
-    else:
+    if slot is None:
         raise Refused("지금 같은 금액대 입금이 몰려 있어요. 금액을 조금 바꿔서 다시 보내주세요.")
     deadline = expires + timedelta(minutes=int(st["slot_grace_minutes"]))
     if not d["deadline"] or d["deadline"] < deadline:
@@ -435,20 +451,28 @@ async def record_incoming(c, ctx: Ctx, tx_id: str, idx: int, frm: str, to: str, 
         return "dup"
     st = await settings(c)
     grace = timedelta(minutes=int(st["slot_grace_minutes"]))
-    slot = await c.fetchrow("SELECT * FROM deposit_slots WHERE amount_micro=$1 AND status='waiting'", amount)
+    # 금액 + 시간 창으로 찾음: 자리를 만든 뒤 ~ 안내 시간+여유 안에 들어온 돈만. 감시가 늦어 자리가 먼저 만료됐어도 인정.
+    slot = await c.fetchrow("SELECT * FROM deposit_slots WHERE amount_micro=$1 AND status IN ('waiting','expired') "
+                            "AND created_at - $3::interval <= $2 AND $2 <= expires_at + $4::interval ORDER BY created_at DESC LIMIT 1",
+                            amount, block_ts, CLOCK_SKEW, grace)
+    note = ""
     if slot:
         await _lock(c, slot["deal_id"])
-        slot = await c.fetchrow("SELECT * FROM deposit_slots WHERE id=$1 AND status='waiting' FOR UPDATE", slot["id"])
-    status, note, slot_id = "unmatched", "", None
+        slot = await c.fetchrow("SELECT * FROM deposit_slots WHERE id=$1 AND status IN ('waiting','expired') FOR UPDATE", slot["id"])
+        if slot and slot["status"] == "expired" and await c.fetchval(
+                "SELECT 1 FROM deposit_slots WHERE deal_id=$1 AND tg_id=$2 AND status IN ('waiting','received','confirmed')",
+                slot["deal_id"], slot["tg_id"]):
+            slot, note = None, "만료된 자리 금액 — 그 사람은 새 입금 자리가 있음"
+    elif await c.fetchval("SELECT 1 FROM deposit_slots WHERE amount_micro=$1 AND updated_at > now() - $2::interval", amount, AMOUNT_HOLD):
+        note = "안내 시간 밖에 들어옴"
+    status, slot_id = "unmatched", None
     if blacklisted:
         status, note = "flagged", "보낸 주소가 테더 동결 목록"
-    elif slot and block_ts <= slot["expires_at"] + grace:
+    elif slot:
         status, slot_id = "matched", slot["id"]
         if blacklisted is None:
             note = "동결 목록 조회 실패 — 관리자 확인"
-    elif slot:
-        note = "안내 시간 지나서 들어옴"
-    elif amount < DUST_MICRO:
+    elif amount < DUST_MICRO and not note:
         status, note = "ignored", "먼지 입금"
     await c.execute("INSERT INTO chain_tx(tx_id, idx, direction, from_addr, to_addr, amount_micro, block_ts, status, slot_id, note) "
                     "VALUES($1,$2,'in',$3,$4,$5,$6,$7,$8,$9)", tx_id, idx, frm, to, amount, block_ts, status, slot_id, note)
@@ -1042,13 +1066,16 @@ async def assign_deposit(c, ctx: Ctx, tx_id: str, idx: int, slot_id: int, admin:
     """확인 필요 입금을 관리자가 거래 자리에 연결 (금액이 조금 다름·늦게 옴). 자리 금액은 실제 받은 금액으로 고침."""
     if admin not in ctx.admins:
         raise Refused("관리자만")
+    deal_id = await c.fetchval("SELECT deal_id FROM deposit_slots WHERE id=$1", slot_id)
+    if deal_id is None:
+        raise Refused("그 입금 자리는 이미 처리됐어요.")
+    d = await _lock(c, deal_id)       # 잠금 순서: 거래 → 자리·입금 (감시와 같은 순서 — 동시에 같은 자리를 잡지 못하게)
     tx = await c.fetchrow("SELECT * FROM chain_tx WHERE tx_id=$1 AND idx=$2 FOR UPDATE", tx_id, idx)
     if not tx or tx["direction"] != "in" or tx["status"] not in ("unmatched", "flagged"):
         raise Refused("연결할 수 있는 입금이 아니에요.")
-    slot = await c.fetchrow("SELECT * FROM deposit_slots WHERE id=$1", slot_id)
-    if not slot or slot["status"] not in ("waiting", "expired", "cancelled"):
+    slot = await c.fetchrow("SELECT * FROM deposit_slots WHERE id=$1 FOR UPDATE", slot_id)
+    if slot["status"] not in ("waiting", "expired", "cancelled"):
         raise Refused("그 입금 자리는 이미 처리됐어요.")
-    d = await _lock(c, slot["deal_id"])
     if d["state"] == "DISPUTE":
         raise Refused("분쟁 중인 거래예요. 분쟁을 먼저 처리해주세요.")
     if await c.fetchval("SELECT count(*) FROM deposit_slots WHERE deal_id=$1 AND tg_id=$2 AND id<>$3 "
@@ -1081,8 +1108,8 @@ async def expire_due(c, ctx: Ctx) -> int:
     """30초마다: 시간 넘긴 거래 정리. 들어온 돈이 있으면 환불, 없으면 취소. 처리한 수."""
     st = await settings(c)
     grace = timedelta(minutes=int(st["slot_grace_minutes"]))
-    await c.execute("UPDATE deposit_slots SET status='expired', updated_at=now() WHERE status='waiting' AND expires_at + $1 < now()",
-                    grace)
+    await c.execute("UPDATE deposit_slots SET status='expired', updated_at=now() WHERE id IN ("
+                    "SELECT id FROM deposit_slots WHERE status='waiting' AND expires_at + $1 < now() FOR UPDATE SKIP LOCKED)", grace)
     ids = [r["id"] for r in await c.fetch("SELECT id FROM deals WHERE state = ANY($1) AND deadline < now() "
                                           "ORDER BY deadline LIMIT 50", list(EXPIRING))]
     n = 0
