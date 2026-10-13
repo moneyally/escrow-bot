@@ -1054,6 +1054,8 @@ def build(cfg) -> Application:
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("apscheduler").setLevel(logging.WARNING)      # 1초마다 '작업 실행' 줄이 로그를 덮어서
+    logging.getLogger("telethon").setLevel(logging.WARNING)
     cfg = cfgmod.load()
     if not cfg.bot_token:
         raise SystemExit("BOT_TOKEN 이 없어요 (.env)")
